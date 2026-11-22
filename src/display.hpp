@@ -25,6 +25,20 @@ inline uint32_t display_pixel(const Gpu& gpu,const DisplayView& v,unsigned x,uns
  const unsigned start=v.x*2+x*3;
  return (byte(start)<<16)|(byte(start+1)<<8)|byte(start+2);
 }
+inline void snapshot_display_vram(const Gpu& source,Gpu& snapshot,const DisplayView& view){
+ if(view.disabled)return;
+ const unsigned row_words=view.rgb24?(view.width*3+1)/2:view.width;
+ const unsigned copy_words=std::min(row_words,1024u);
+ for(unsigned y=0;y<view.height;y++){
+  const unsigned row=((view.y+y)&511)*1024;
+  unsigned x=view.x&1023,remaining=copy_words;
+  while(remaining){
+   const unsigned count=std::min(remaining,1024-x),offset=row+x;
+   std::copy_n(source.vram.begin()+offset,count,snapshot.vram.begin()+offset);
+   remaining-=count;x=0;
+  }
+ }
+}
 struct ViewRect {int x=0,y=0,width=0,height=0;};
 inline ViewRect fit_display(int width,int height){
  if(width<=0||height<=0)return {};

@@ -16,7 +16,7 @@ void Gpu::update_video_status(){
 bool Gpu::tick_video(unsigned timer_sources){
  const bool was_hblank=video_hblank,was_vblank=video_vblank;
  timer_dots=0;timer_hblank_rise=false;
- video_fraction+=11;const unsigned elapsed=video_fraction/7;video_dot+=elapsed;video_fraction%=7;
+	video_fraction+=11;const unsigned elapsed=video_fraction/7;video_dot+=elapsed;video_fraction%=7;
  if(timer_sources&1){
   constexpr unsigned dividers[]={10,8,5,4};const unsigned divider=(display[3]&64)?7:dividers[display[3]&3];
   pixel_fraction+=elapsed;timer_dots=pixel_fraction/divider;pixel_fraction%=divider;

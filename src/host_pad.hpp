@@ -18,6 +18,9 @@ public:
  void clear(){state.store(0);}
  uint16_t held_buttons()const{return uint16_t(~state.load());}
  uint16_t pending_presses()const{return uint16_t(state.load()>>16);}
+ void snapshot(uint16_t& active_low,uint16_t& presses)const{
+  const auto value=state.load();active_low=uint16_t(~value);presses=uint16_t(value>>16);
+ }
  uint16_t consume_poll(){const auto s=state.fetch_and(0xffffu);return uint16_t(~((s&0xffffu)|(s>>16)));}
 };
 }

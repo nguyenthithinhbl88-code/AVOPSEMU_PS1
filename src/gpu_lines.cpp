@@ -1,9 +1,11 @@
 #include "gpu.hpp"
+#include "gpu_perf_timer.hpp"
 #include <algorithm>
 #include <cstdlib>
 namespace ps1 {
 namespace {int sx(uint32_t n){const int v=n&2047;return(v&1024)?v-2048:v;}}
 void Gpu::render_line(Vertex a,Vertex b,bool semi){
+  ScopedGpuRasterTimer raster_timer(raster_time_ns);
  const int dx=std::abs(b.x-a.x),dy=std::abs(b.y-a.y);if(dx>=1024||dy>=512)return;
  const int n=std::max(dx,dy),step_x=a.x<b.x?1:-1,step_y=a.y<b.y?1:-1;
  int x=a.x,y=a.y,error=dx-dy;

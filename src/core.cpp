@@ -1,4 +1,6 @@
 #include "core.hpp"
+#include "cpu_crash_context.hpp"
+#include <algorithm>
 #include <fstream>
 #include <stdexcept>
 #include <sstream>
@@ -16,8 +18,10 @@ void Bus::sample_irq_lines(){
 }
 void Bus::tick_timers(){
  cd.clocks++;
- for(auto& port:sio)if(port.ack_delay||port.ack_width||port.irq_reassert)port.tick(cd.clocks);
- for(unsigned ch:{2u,3u,4u})if(dma[ch].chop_wait)dma[ch].chop_wait--;
+ for(auto& port:sio){port.context_pc=writer_cpu?writer_pc:0;if(port.tx_busy||port.ack_delay||port.ack_width||port.irq_reassert)port.tick(cd.clocks);}
+ if(dma[2].chop_wait)dma[2].chop_wait--;
+ if(dma[3].chop_wait)dma[3].chop_wait--;
+ if(dma[4].chop_wait)dma[4].chop_wait--;
  const unsigned sources=((timers[0].mode&0x100)?1:0)|(((timers[0].mode&1)||(timers[1].mode&0x100))?2:0);
  const bool vblank=gpu.tick_video(sources);if(vblank)irq_status|=1;
  sample_irq_lines();bool resample=false;
@@ -25,7 +29,8 @@ void Bus::tick_timers(){
  if(dma[3].control&(1u<<24)){run_dma(3);resample=true;}
  if(dma[0].control&(1u<<24)){run_dma(0);resample=true;}
  if(dma[1].control&(1u<<24)){run_dma(1);resample=true;}
- for(unsigned ch:{2u,4u})if((dma[ch].control&0x1000100u)==0x1000100u){run_dma(ch);resample=true;}
+ if((dma[2].control&0x1000100u)==0x1000100u){run_dma(2);resample=true;}
+ if((dma[4].control&0x1000100u)==0x1000100u){run_dma(4);resample=true;}
  if(++spu.sample_clock==768){spu.sample_clock=0;const auto pcm=cd.audio_sample();spu.render_sample(pcm[0],pcm[1]);resample=true;}if(resample)sample_irq_lines();
  if(timers[0].tick(0,gpu.timer_dots,gpu.video_hblank,gpu.timer_hblank_rise))irq_status|=1u<<4;
  if(timers[1].tick(1,gpu.timer_hblank_rise?1:0,gpu.video_vblank,vblank))irq_status|=1u<<5;
@@ -142,6 +147,7 @@ static uint32_t sar(uint32_t v,unsigned n) {
     return (v>>n) | ((v&0x80000000u) ? (~uint32_t(0)<<(32-n)) : 0);
 }
 void Cpu::reset(uint32_t entry) {
+    clear_cpu_crash_context();
     gte=Gte{};first_fault=FaultSnapshot{};bios_system_error=false;
     bios_calls=0;last_bios_vector=last_bios_function=last_bios_return=0;last_bios_args.fill(0);
     instructions=interrupts=reserved_exceptions=0;last_reserved_pc=last_reserved_opcode=0;trace.fill({});r.fill(0);cop0.fill(0);cop0[12]=0x00400000;cop0[15]=2;
@@ -195,7 +201,7 @@ void Cpu::step() {
     auto word=[](const uint8_t* data){return uint32_t(data[0])|(uint32_t(data[1])<<8)|(uint32_t(data[2])<<16)|(uint32_t(data[3])<<24);};
     const uint32_t ins=vector<0x800000?word(bus.ram.data()+(vector&0x1fffff)):
         vector>=0x1fc00000&&vector<0x1fc80000?word(bus.bios.data()+vector-0x1fc00000):bus.read32(ip);
-    fetched_opcode=ins;has_opcode=true;bus.writer_pc=ip;bus.writer_opcode=ins;bus.writer_instruction=instructions;bus.writer_cpu=true;
+    fetched_opcode=ins;has_opcode=true;record_cpu_crash_context(ip,ins);bus.writer_pc=ip;bus.writer_opcode=ins;bus.writer_instruction=instructions;bus.writer_cpu=true;
     trace[instructions%trace.size()]={ip,ins,r[(ins>>21)&31],r[(ins>>16)&31],pending_reg,pending_value};instructions++;
     // Observe BIOS putchar entry without replacing or skipping its instructions.
     if(((ip&0x1fffffff)==0xa0 && r[9]==0x3c)||((ip&0x1fffffff)==0xb0 && r[9]==0x3d))bus.append_tty(char(r[4]&255));
@@ -370,12 +376,13 @@ std::string Cpu::diagnostic()const{
   out<<"RAM window "<<std::hex<<address<<" (live RAM, no MMIO):\n";
   for(unsigned offset=0;offset<128;offset+=16){const auto at=base+offset;if(at>=0x800000)break;out<<std::setw(8)<<at<<":";for(unsigned lane=0;lane<16;lane+=4)out<<" "<<std::setw(8)<<bus.read32(at+lane);out<<"\n";}
  };
- ram_window(0x10000);if((physical(r[4])&~15u)!=0x10000)ram_window(r[4]);
+  ram_window(0x10000);if((physical(r[4])&~15u)!=0x10000)ram_window(r[4]);
  out<<"Pad connected="<<bus.sio[0].connected<<" buttons="<<std::hex<<bus.sio[0].buttons<<" phase="<<std::dec<<bus.sio[0].phase<<" polls="<<bus.sio[0].polls<<" ACK_events="<<bus.sio[0].ack_events<<" ACK_delay="<<bus.sio[0].ack_delay<<" ACK_level="<<bus.sio[0].ack<<"\n";
  out<<"Pad protocol transfers="<<std::dec<<bus.sio[0].transfers<<" complete="<<bus.sio[0].completed_polls<<" pressed="<<bus.sio[0].pressed_polls<<" latched="<<std::hex<<bus.sio[0].latched_buttons<<" last_pressed="<<bus.sio[0].last_pressed_buttons<<" CTRL="<<bus.sio[0].control<<" MODE="<<bus.sio[0].mode<<" BAUD="<<bus.sio[0].baud<<" IRQ="<<bus.sio[0].irq<<" last_TX="<<unsigned(bus.sio[0].last_tx)<<"\n";
  out<<bus.sio[0].diagnostic();
  out<<"GPUSTAT="<<std::hex<<bus.gpu.status<<" DrawMode="<<bus.gpu.draw_mode<<" TextureWindow="<<bus.gpu.texture_window<<" PacketWords="<<std::dec<<bus.gpu.count<<"\n";
  out<<"GPU words="<<bus.gpu.words<<" polygons="<<bus.gpu.polygons<<" rectangles="<<bus.gpu.rectangles<<" lines="<<bus.gpu.line_segments<<"\n";
+  out<<"GPU host rasterizer time ns="<<std::dec<<bus.gpu.raster_time_ns<<" (since GPU reset; host CPU time, not emulated GPU time)\n";
  out<<"Video line="<<std::dec<<bus.gpu.video_line<<" dot="<<bus.gpu.video_dot<<" field="<<bus.gpu.video_field<<" vblank="<<bus.gpu.video_vblank<<" frames="<<bus.gpu.video_frames<<" vblank_events="<<bus.gpu.vblank_events<<"\n";
  out<<"GPU display registers:";for(auto word:bus.gpu.display)out<<" "<<std::hex<<word;out<<"\n";
  out<<"Recent GP0 words (oldest first):\n";

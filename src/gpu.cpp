@@ -1,10 +1,11 @@
 #include "gpu.hpp"
 #include "core.hpp"
+#include "gpu_perf_timer.hpp"
 #include <stdexcept>
 #include <algorithm>
 #include <sstream>
 namespace ps1 {
-void Gpu::reset(){display_revision++;pixel_fraction=timer_dots=0;video_hblank=true;timer_hblank_rise=false;read_w=read_h=read_index=read_latch=0;words=polygons=rectangles=line_segments=0;polyline_active=polyline_color_pending=false;history.fill(0);count=0;upload_w=upload_h=upload_index=0;status=0x14802000;draw_mode=texture_window=0;allow_texture_y512=false;display.fill(0);display_configured=false;horizontal_range_set=vertical_range_set=false;video_fraction=video_dot=video_line=0;video_field=false;video_vblank=true;video_frames=vblank_events=0;left=top=right=bottom=offset_x=offset_y=0;force_mask=check_mask=false;}
+void Gpu::reset(){display_revision++;pixel_fraction=timer_dots=0;video_hblank=true;timer_hblank_rise=false;read_w=read_h=read_index=read_latch=0;words=polygons=rectangles=line_segments=0;raster_time_ns=0;polyline_active=polyline_color_pending=false;history.fill(0);count=0;upload_w=upload_h=upload_index=0;status=0x14802000;draw_mode=texture_window=0;allow_texture_y512=false;display.fill(0);display_configured=false;horizontal_range_set=vertical_range_set=false;video_fraction=video_dot=video_line=0;video_field=false;video_vblank=true;video_frames=vblank_events=0;left=top=right=bottom=offset_x=offset_y=0;force_mask=check_mask=false;}
 uint32_t Gpu::rgb(unsigned x,unsigned y)const{
  const uint16_t c=vram[(y&511)*1024+(x&1023)];
  auto expand=[](unsigned v){return(v<<3)|(v>>2);};
@@ -66,7 +67,8 @@ void Gpu::shaded_triangle(uint32_t c0,uint32_t a,uint32_t c1,uint32_t b,uint32_t
 }
 void Gpu::gp0(uint32_t word){
  history[words++%history.size()]=word;
- if(upload_w){
+   if(upload_w){
+   ScopedGpuRasterTimer raster_timer(raster_time_ns);
   for(unsigned i=0;i<2 && upload_index<upload_w*upload_h;i++,upload_index++){
    unsigned x=(upload_x+upload_index%upload_w)&1023,y=(upload_y+upload_index/upload_w)&511;
    pixel(y*1024+x,uint16_t(word>>(i*16)));
@@ -101,7 +103,8 @@ void Gpu::gp0(uint32_t word){
  if(op==0xc0){
   read_x=packet[1]&1023;read_y=(packet[1]>>16)&511;read_w=((packet[2]-1)&1023)+1;read_h=(((packet[2]>>16)-1)&511)+1;read_index=0;status|=1u<<27;return;
  }
- if(op==0x80){
+   if(op==0x80){
+   ScopedGpuRasterTimer raster_timer(raster_time_ns);
   unsigned sx=packet[1]&1023,sy=(packet[1]>>16)&511,dx=packet[2]&1023,dy=(packet[2]>>16)&511;
   unsigned w=((packet[3]-1)&1023)+1,h=(((packet[3]>>16)-1)&511)+1;
   // Sequential copy is a functional approximation for overlapping hardware blocks.
@@ -114,7 +117,8 @@ void Gpu::gp0(uint32_t word){
   upload_h=(((packet[2]>>16)-1)&511)+1;upload_index=0;return;
  }
  x&=~15u;unsigned w=((packet[2]&1023)+15)&~15u,h=(packet[2]>>16)&511;
- const uint32_t c=packet[0];const uint16_t pixel=uint16_t(((c>>3)&31)|(((c>>11)&31)<<5)|(((c>>19)&31)<<10));
+   const uint32_t c=packet[0];const uint16_t pixel=uint16_t(((c>>3)&31)|(((c>>11)&31)<<5)|(((c>>19)&31)<<10));
+  ScopedGpuRasterTimer raster_timer(raster_time_ns);
  for(unsigned j=0;j<h;j++)for(unsigned i=0;i<w;i++)vram[((y+j)&511)*1024+((x+i)&1023)]=pixel;
 }
 unsigned install_gpu_demo(Bus& bus){

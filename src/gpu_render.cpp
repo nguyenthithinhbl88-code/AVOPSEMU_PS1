@@ -1,4 +1,5 @@
 #include "gpu.hpp"
+#include "gpu_perf_timer.hpp"
 #include <algorithm>
 namespace ps1 {
 namespace {
@@ -6,6 +7,55 @@ int sx11(uint32_t word){const int n=word&2047;return n&1024?n-2048:n;}
 int64_t edge(const Gpu::Vertex& a,const Gpu::Vertex& b,const Gpu::Vertex& p){return int64_t(b.x-a.x)*(p.y-a.y)-int64_t(b.y-a.y)*(p.x-a.x);}
 bool inclusive(const Gpu::Vertex& a,const Gpu::Vertex& b){return b.y<a.y||(b.y==a.y&&b.x>a.x);}
 uint16_t opaque_rgb(uint32_t color){return uint16_t(((color>>3)&31)|((color>>6)&0x3e0)|((color>>9)&0x7c00));}
+void render_textured_triangle(Gpu& gpu,Gpu::Vertex a,Gpu::Vertex b,Gpu::Vertex c,int64_t area,int x0,int x1,int y0,int y1,uint16_t clut,bool flat,bool raw,bool semi,bool dither){
+ const bool i0=inclusive(b,c),i1=inclusive(c,a),i2=inclusive(a,b);
+ const Gpu::Vertex origin{x0,y0,0,0,0};
+ auto row0=edge(b,c,origin),row1=edge(c,a,origin),row2=edge(a,b,origin);
+ const int64_t step0_x=b.y-c.y,step1_x=c.y-a.y,step2_x=a.y-b.y;
+ const int64_t step0_y=c.x-b.x,step1_y=a.x-c.x,step2_y=b.x-a.x;
+ const bool flat_u=a.u==b.u&&a.u==c.u,flat_v=a.v==b.v&&a.v==c.v;
+ if(flat){
+  const int64_t u_step=step0_x*a.u+step1_x*b.u+step2_x*c.u;
+  const int64_t v_step=step0_x*a.v+step1_x*b.v+step2_x*c.v;
+  for(int y=y0;y<=y1;y++){
+   auto w0=row0,w1=row1,w2=row2;
+   int64_t u_numerator=flat_u?0:row0*a.u+row1*b.u+row2*c.u;
+   int64_t v_numerator=flat_v?0:row0*a.v+row1*b.v+row2*c.v;
+   for(int x=x0;x<=x1;x++){
+    if(w0>=0&&w1>=0&&w2>=0&&(w0!=0||i0)&&(w1!=0||i1)&&(w2!=0||i2)){
+     const unsigned u=flat_u?unsigned(a.u):unsigned(u_numerator/area);
+     const unsigned v=flat_v?unsigned(a.v):unsigned(v_numerator/area);
+     gpu.fragment(x,y,a.color,gpu.texel(u,v,clut),true,raw,semi,dither);
+    }
+    w0+=step0_x;w1+=step1_x;w2+=step2_x;
+    u_numerator+=u_step;v_numerator+=v_step;
+   }
+   row0+=step0_y;row1+=step1_y;row2+=step2_y;
+  }
+  return;
+ }
+ const std::array<int64_t,3> color_a{{int64_t(a.color&255),int64_t((a.color>>8)&255),int64_t((a.color>>16)&255)}};
+ const std::array<int64_t,3> color_b{{int64_t(b.color&255),int64_t((b.color>>8)&255),int64_t((b.color>>16)&255)}};
+ const std::array<int64_t,3> color_c{{int64_t(c.color&255),int64_t((c.color>>8)&255),int64_t((c.color>>16)&255)}};
+ std::array<int64_t,3> color_step{};
+ for(unsigned channel=0;channel<3;channel++)color_step[channel]=step0_x*color_a[channel]+step1_x*color_b[channel]+step2_x*color_c[channel];
+ for(int y=y0;y<=y1;y++){
+  auto w0=row0,w1=row1,w2=row2;
+  std::array<int64_t,3> color_numerator{};
+  for(unsigned channel=0;channel<3;channel++)color_numerator[channel]=row0*color_a[channel]+row1*color_b[channel]+row2*color_c[channel];
+  for(int x=x0;x<=x1;x++){
+   if(w0>=0&&w1>=0&&w2>=0&&(w0!=0||i0)&&(w1!=0||i1)&&(w2!=0||i2)){
+    const uint32_t color=uint32_t(color_numerator[0]/area)|(uint32_t(color_numerator[1]/area)<<8)|(uint32_t(color_numerator[2]/area)<<16);
+    const unsigned u=flat_u?unsigned(a.u):unsigned((w0*a.u+w1*b.u+w2*c.u)/area);
+    const unsigned v=flat_v?unsigned(a.v):unsigned((w0*a.v+w1*b.v+w2*c.v)/area);
+    gpu.fragment(x,y,color,gpu.texel(u,v,clut),true,raw,semi,dither);
+   }
+   w0+=step0_x;w1+=step1_x;w2+=step2_x;
+   for(unsigned channel=0;channel<3;channel++)color_numerator[channel]+=color_step[channel];
+  }
+  row0+=step0_y;row1+=step1_y;row2+=step2_y;
+ }
+}
 }
 uint16_t Gpu::texel(unsigned u,unsigned v,uint16_t clut)const{
  if((draw_mode&0x800)&&allow_texture_y512)return 0;
@@ -50,6 +100,7 @@ void Gpu::fragment(int x,int y,uint32_t color,uint16_t texture,bool textured,boo
  pixel(index,value);
 }
 void Gpu::render_triangle(Vertex a,Vertex b,Vertex c,uint16_t clut,bool textured,bool raw,bool semi,bool dither){
+ ScopedGpuRasterTimer raster_timer(raster_time_ns);
  int64_t area=edge(a,b,c);if(!area)return;
  if(std::max({a.x,b.x,c.x})-std::min({a.x,b.x,c.x})>=1024||std::max({a.y,b.y,c.y})-std::min({a.y,b.y,c.y})>=512)return;
  if(area<0){std::swap(b,c);area=-area;}
@@ -57,29 +108,30 @@ void Gpu::render_triangle(Vertex a,Vertex b,Vertex c,uint16_t clut,bool textured
  const int y0=std::max({0,top,std::min({a.y,b.y,c.y})}),y1=std::min({511,bottom,std::max({a.y,b.y,c.y})});
  const bool flat=(a.color&0xffffff)==(b.color&0xffffff)&&(a.color&0xffffff)==(c.color&0xffffff);
  if(textured){
-  // Multiplication-based edge evaluation is faster for the texture-heavy path
-  // on the reference GCC build; retain it while accelerating untextured draws.
-  for(int y=y0;y<=y1;y++)for(int x=x0;x<=x1;x++){
-   const Vertex p{x,y,0,0,0};const auto w0=edge(b,c,p),w1=edge(c,a,p),w2=edge(a,b,p);
-   if(w0<0||w1<0||w2<0||(w0==0&&!inclusive(b,c))||(w1==0&&!inclusive(c,a))||(w2==0&&!inclusive(a,b)))continue;
-  uint32_t color=a.color;
-  if(!flat){color=0;for(unsigned shift=0;shift<24;shift+=8)color|=uint32_t((w0*((a.color>>shift)&255)+w1*((b.color>>shift)&255)+w2*((c.color>>shift)&255))/area)<<shift;}
-  const unsigned u=unsigned((w0*a.u+w1*b.u+w2*c.u)/area),v=unsigned((w0*a.v+w1*b.v+w2*c.v)/area);
-  fragment(x,y,color,texel(u,v,clut),true,raw,semi,dither);
-  }
+   render_textured_triangle(*this,a,b,c,area,x0,x1,y0,y1,clut,flat,raw,semi,dither);
   return;
  }
  const bool i0=inclusive(b,c),i1=inclusive(c,a),i2=inclusive(a,b);
  const Vertex origin{x0,y0,0,0,0};
  auto row0=edge(b,c,origin),row1=edge(c,a,origin),row2=edge(a,b,origin);
+  const int64_t step0_x=b.y-c.y,step1_x=c.y-a.y,step2_x=a.y-b.y;
+  const std::array<int64_t,3> color_a{{int64_t(a.color&255),int64_t((a.color>>8)&255),int64_t((a.color>>16)&255)}};
+  const std::array<int64_t,3> color_b{{int64_t(b.color&255),int64_t((b.color>>8)&255),int64_t((b.color>>16)&255)}};
+  const std::array<int64_t,3> color_c{{int64_t(c.color&255),int64_t((c.color>>8)&255),int64_t((c.color>>16)&255)}};
+  std::array<int64_t,3> color_step{};
+  if(!flat)for(unsigned channel=0;channel<3;channel++)color_step[channel]=step0_x*color_a[channel]+step1_x*color_b[channel]+step2_x*color_c[channel];
  for(int y=y0;y<=y1;y++,row0+=c.x-b.x,row1+=a.x-c.x,row2+=b.x-a.x){
  auto w0=row0,w1=row1,w2=row2;
- for(int x=x0;x<=x1;x++,w0-=c.y-b.y,w1-=a.y-c.y,w2-=b.y-a.y){
-  if(w0<0||w1<0||w2<0||(w0==0&&!i0)||(w1==0&&!i1)||(w2==0&&!i2))continue;
-  uint32_t color=a.color;
-  if(!flat){color=0;for(unsigned shift=0;shift<24;shift+=8)color|=uint32_t((w0*((a.color>>shift)&255)+w1*((b.color>>shift)&255)+w2*((c.color>>shift)&255))/area)<<shift;}
-  if(!semi&&!dither)pixel(unsigned(y*1024+x),opaque_rgb(color));
-  else fragment(x,y,color,0,false,raw,semi,dither);
+  std::array<int64_t,3> color_numerator{};
+  if(!flat)for(unsigned channel=0;channel<3;channel++)color_numerator[channel]=row0*color_a[channel]+row1*color_b[channel]+row2*color_c[channel];
+  for(int x=x0;x<=x1;x++,w0-=c.y-b.y,w1-=a.y-c.y,w2-=b.y-a.y){
+   if(w0>=0&&w1>=0&&w2>=0&&(w0!=0||i0)&&(w1!=0||i1)&&(w2!=0||i2)){
+    uint32_t color=a.color;
+    if(!flat)color=uint32_t(color_numerator[0]/area)|(uint32_t(color_numerator[1]/area)<<8)|(uint32_t(color_numerator[2]/area)<<16);
+    if(!semi&&!dither)pixel(unsigned(y*1024+x),opaque_rgb(color));
+    else fragment(x,y,color,0,false,raw,semi,dither);
+   }
+   if(!flat)for(unsigned channel=0;channel<3;channel++)color_numerator[channel]+=color_step[channel];
  }
  }
 }
@@ -99,6 +151,7 @@ void Gpu::polygon_packet(){
  if(n==4)render_triangle(vertices[1],vertices[2],vertices[3],clut,textured,raw,semi,dither);
 }
 void Gpu::rectangle_packet(){
+ ScopedGpuRasterTimer raster_timer(raster_time_ns);
  const unsigned op=packet[0]>>24;const bool textured=op&4,raw=op&1,semi=op&2;
  const int x=sx11(packet[1])+offset_x,y=sx11(packet[1]>>16)+offset_y;
  unsigned w=1,h=1;const unsigned size=(op>>3)&3;

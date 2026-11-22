@@ -9,6 +9,7 @@ struct Gpu {
  std::array<uint32_t,12> packet{};
  unsigned count=0;
  uint64_t words=0,polygons=0,rectangles=0,line_segments=0;
+   uint64_t raster_time_ns=0;
  std::array<uint32_t,64> history{};
  struct Vertex {int x=0,y=0,u=0,v=0;uint32_t color=0;};
  uint16_t texel(unsigned u,unsigned v,uint16_t clut)const;
