@@ -1,0 +1,66 @@
+AVOPSEMU PS2 v52 validation
+GCC C++17 -O2 -Wall -Wextra -Werror -pthread on Linux.
+36/36 PS2 test suites passed. 18 PS2 core translation units compiled.
+4/4 AddressSanitizer+UndefinedBehaviorSanitizer suites passed:
+ps2_vu_macro_tests, ps2_cop2_tests, ps2_branch_tests, ps2_vif_upload_tests.
+
+New regression: exact three final opcodes in uploaded log (6):
+8000DF00 48420800 CFC2 v0,VI1
+8000DF04 48C40800 CTC2 a0,VI1
+8000DF08 4B000BFF VISWR.x VI0,(VI1)
+Fixture completed at 8000DF0C without first_fault; VU1 VI1 became zero;
+VU0 RAM sentinel at offset 210 remained unchanged; no GS display forced.
+This is an authored replay with the logged relevant registers, not full Sony BIOS execution.
+5000 integer reference cases; all masks for moves/rotation/VI-to-VF and memory;
+VU1 VI16/zero padding/constants/mirrors; VU0 shared RAM; VI wrap/pre/post updates;
+BC2F/T/FL/TL with both conditions; CU2/busy/unsupported guard and reset diagnostics.
+
+205 packaged PS1 files byte-identical to preceding PS1 v51. No PR #1 changes merged.
+No BIOS/game files included. No Windows/MSVC build or real BIOS boot tested here.
+No claimed PS2 menu/game compatibility or FPS improvement.
+
+Full regular test output:
+PASS: BA0/DVE latches, FIFO bounds, command status, snapshots, aliases and exact log SH BA000010 -> 80007CC4
+PASS: authored 4 MiB reset ROM -> LQ/POR/SQ -> RAM -> EE GS/MMIO setup -> DMA chain -> GIF -> six primitives/640x448 scanout; NOT a Sony BIOS compatibility test
+PASS: 24-instruction uploaded BIOS trace through F500, aliases/reset/strict widths, write fault direction, BIOS write protection and RAM/scratchpad writes
+PASS: MCH lane access and log LHU, single fetch, binary trace ring/faults, Count wait observation/exact exit and fast memory edges
+PASS: all 8 REGIMM branches, 4 branch-likely families, delay annul/link/source edges, variable 64-bit shifts and LWU
+PASS: seven coherent cache-maintenance ops, privilege/unknown/MMIO guards, reported IXIN + BIOS tail, self-modifying code and delay slots
+PASS: all eight GIF source-chain tags, CALL/RET, IRQ/TIE, resume, scratchpad wrap, pause, bounded cycles/BUSERR and EE-to-GS program
+PASS: screenshot Wired regression, Random bounds/read-only, TLBWI/WR/R/P, ASID/global/page masks, CP0 staging masks and strict bounds
+PASS: 32 FPR moves/raw memory, FCR masks, MOV.S, BC1 variants, CU1/fault guards and log9 prologue replay to 9FC434A8
+PASS: log CFC2 FBRST -> 8000DF48, COP2 control/quadword moves, constants, masks/reset, CU2, strict unsupported VU launch/interlocks
+PASS: unaligned 32/64-bit loads/stores, 128-bit MMI, HI1/LO1, SA/QFSRV, EI/DI and DMA condition branches
+PASS: seven COP0 debug latches, three performance registers/selectors, mode gates, guest SYSCALL/BREAK/TRAP/overflow and ERET
+PASS: full firmware DMAC clear loop through DMA3/IPU to 8000DE38, 19 bootstrap latches and GS write trace
+PASS: DMA0/1/2 SADR bootstrap registers, aliases/mask/strict guards and log tail to 8000DE18
+PASS: original EE demo, 128-bit registers/LQ/SQ, arithmetic, delay slots, memory aliases, ELF/BSS/atomic validation and BIOS mapping
+PASS: GIF CPU/FIFO/A+D/REGLIST, 50 states, signal/label/finish, strict faults, synthetic BIOS/RDRAM/KPUTCHAR/trace
+PASS: GS Gouraud triangle/line, winding, alpha interpolation, mask and FBA
+PASS: 96 alpha boundary/fail cases, ALPHA/COLCLAMP/PABE, DATE/FBA, masked depth modes and framebuffer masks
+PASS: exact GS-init 14-instruction log tail through LBU BF80146E to 8000D6E4, probe isolation and no fabricated display
+PASS: GS revision ID, byte/halfword lanes/aliases, CSR W1C/IMR, soft-reset VRAM/display/GIF preservation and strict guards
+PASS: EE MMIO banks, timers/HBlank/VBlank, INTC/DMAC/SIF, real GIF DMA pause/completion/bus error, IRQ/BD/ERET/Compare and RAM aliases
+PASS: IOP bootstrap byte latch aliases/reset/readback, strict widths/neighbors, reported LBU and 64-instruction user tail replay to 9FC42B30
+PASS: IOP 1472 strict halfword latch and supplied 64-attempt GS/SH replay to 9FC430D8
+PASS: 21 config words, 13 IOP DMA banks, interrupt side effects, IOP/VU memory, EE SQ/LQ and log7 replay to 9FC430E0
+PASS: IPU reset/config, BCLR/SETTH IRQ8, masks/aliases/widths/read-only registers, atomic unsupported guards and EE startup fixture
+PASS: 16 MCH backing slots/guards, RDRAM protocol, snapshot/reset and log10 replay to 9FC41360
+PASS: packed RGBA/Q/STQ/UV/XYZ/XYZF/FOG/TEX/CLAMP, ADC no-draw and reserved descriptor
+PASS: EE-to-GS program, HI/LO divide corner cases, COP0 moves/PRId/ERET, DSRA, GS lanes/aliases/masks/W1C/reset/local IRQ and explicit gaps
+PASS: BIOS SLTI regression, VRAM swizzle, primitives/masks/clipping/contexts, IMAGE/HWREG, display crop/BGRA and CPU/GIF GPU demo
+PASS: 6 unsigned saturating operations, 16800 lane checks/alias/zero, unsupported neighbor and 39-instruction user BIOS replay to BFC00878
+PASS: EE SIO registers, lanes/aliases, SDK init, console capture/guards and log8 routine replay to 9FC43378
+PASS: uploaded 13-instruction BIOS trace through SYNC.P, SYNC.L/P state/counters, memory visibility and strict unsupported instructions
+PASS: PS2 toolbar/sidebar/GS/debug layout bounds, 48 configurations
+PASS: 42 VIF registers, reset/stall/FDR/RO/ERR/MARK, seven config commands, split payloads, atomic rejection and EE SQ pipeline
+PASS: VIF address commands, MPG/limited V4-32 UNPACK, staged rollback, normal DMA0/1 gates/errors/IRQ completion and authored EE pipeline
+PASS: logged VISWR -> 8000DF0C, 5000 integer reference cases, 16 macro operations, all vector masks, VU0 RAM/VU1 window, BC2 family and strict unsupported guards
+ALL 36 PS2 SUITES PASSED
+
+Full sanitizer output:
+PASS: logged VISWR -> 8000DF0C, 5000 integer reference cases, 16 macro operations, all vector masks, VU0 RAM/VU1 window, BC2 family and strict unsupported guards
+PASS: log CFC2 FBRST -> 8000DF48, COP2 control/quadword moves, constants, masks/reset, CU2, strict unsupported VU launch/interlocks
+PASS: all 8 REGIMM branches, 4 branch-likely families, delay annul/link/source edges, variable 64-bit shifts and LWU
+PASS: VIF address commands, MPG/limited V4-32 UNPACK, staged rollback, normal DMA0/1 gates/errors/IRQ completion and authored EE pipeline
+ALL 4 PS2 SANITIZER SUITES PASSED

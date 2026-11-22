@@ -42,20 +42,62 @@ add_library(ps1_core
 target_include_directories(ps1_core PUBLIC src)
 find_package(Threads REQUIRED)
 target_link_libraries(ps1_core PUBLIC Threads::Threads)
+if(WIN32)
+ add_library(win_crash_diagnostics src/win_crash_diagnostics.cpp)
+ target_include_directories(win_crash_diagnostics PUBLIC src)
+ target_compile_definitions(win_crash_diagnostics PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+ target_link_libraries(win_crash_diagnostics PUBLIC bcrypt)
+ target_link_libraries(ps1_core PUBLIC win_crash_diagnostics)
+endif()
 add_executable(ps1_lab src/main.cpp)
 target_link_libraries(ps1_lab PRIVATE ps1_core)
 if(WIN32)
  enable_language(RC)
  configure_file(src/avopsemu.rc.in ${CMAKE_CURRENT_BINARY_DIR}/avopsemu.rc @ONLY)
+  add_library(avopsemu_frontend src/frontend_settings.cpp src/frontend_library.cpp)
+ target_include_directories(avopsemu_frontend PUBLIC src)
+  target_compile_definitions(avopsemu_frontend PUBLIC UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+  target_link_libraries(avopsemu_frontend PUBLIC user32 gdi32 comdlg32 windowscodecs ole32)
+ if(MSVC)
+  target_compile_options(avopsemu_frontend PRIVATE /utf-8)
+ endif()
  add_executable(pslab WIN32 src/winmain.cpp src/audio_win32.cpp ${CMAKE_CURRENT_BINARY_DIR}/avopsemu.rc)
- target_link_libraries(pslab PRIVATE ps1_core user32 gdi32 comdlg32 winmm avrt)
+   target_link_libraries(pslab PRIVATE ps1_core avopsemu_frontend user32 gdi32 comdlg32 winmm avrt)
  target_compile_definitions(pslab PRIVATE UNICODE _UNICODE NOMINMAX)
  set_target_properties(pslab PROPERTIES OUTPUT_NAME AVOPSEMU)
- if(MSVC)
-  target_compile_options(pslab PRIVATE /utf-8)
+  if(MSVC)
+   target_compile_options(pslab PRIVATE /utf-8)
+  endif()
+  add_custom_command(TARGET pslab POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_CURRENT_SOURCE_DIR}/assets $<TARGET_FILE_DIR:pslab>/assets)
+
+  if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+   enable_language(C)
+   add_library(avopsemu_capi SHARED src/capi.cpp src/audio_win32.cpp)
+   target_include_directories(avopsemu_capi
+    PUBLIC include
+    PRIVATE src
+   )
+   target_compile_definitions(avopsemu_capi PRIVATE
+    AVOPSEMU_CAPI_BUILD
+    UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN
+   )
+   target_link_libraries(avopsemu_capi PRIVATE ps1_core winmm avrt)
+   set_target_properties(avopsemu_capi PROPERTIES OUTPUT_NAME avopsemu_capi)
+   if(MSVC)
+    target_compile_options(avopsemu_capi PRIVATE /utf-8)
+   endif()
+   add_custom_command(TARGET avopsemu_capi POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+     "${CMAKE_CURRENT_SOURCE_DIR}/ui/AVOPSEMU.Wpf/bin/$<CONFIG>/net10.0-windows"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+     "$<TARGET_FILE:avopsemu_capi>"
+     "${CMAKE_CURRENT_SOURCE_DIR}/ui/AVOPSEMU.Wpf/bin/$<CONFIG>/net10.0-windows/avopsemu_capi.dll"
+    VERBATIM
+   )
+  else()
+   message(STATUS "avopsemu_capi is available only for 64-bit Windows builds")
+  endif()
  endif()
- add_custom_command(TARGET pslab POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_CURRENT_SOURCE_DIR}/assets $<TARGET_FILE_DIR:pslab>/assets)
-endif()
 add_executable(ps1_audio_probe tools/audio_probe.cpp)
 target_link_libraries(ps1_audio_probe PRIVATE ps1_core)
 add_executable(ps1_core_benchmark tools/core_benchmark.cpp)
@@ -168,6 +210,9 @@ if(BUILD_TESTING)
  add_executable(performance_equivalence_tests tests/performance_equivalence_tests.cpp)
  target_link_libraries(performance_equivalence_tests PRIVATE ps1_core)
  add_test(NAME performance_equivalence_tests COMMAND performance_equivalence_tests)
+   add_executable(performance_metrics_tests tests/performance_metrics_tests.cpp)
+  target_link_libraries(performance_metrics_tests PRIVATE ps1_core)
+  add_test(NAME performance_metrics_tests COMMAND performance_metrics_tests)
  add_executable(platform_tests tests/platform_tests.cpp)
  target_link_libraries(platform_tests PRIVATE ps1_core)
  add_test(NAME platform_tests COMMAND platform_tests)
@@ -216,6 +261,64 @@ if(BUILD_TESTING)
  add_executable(xa_audio_tests tests/xa_audio_tests.cpp)
  target_link_libraries(xa_audio_tests PRIVATE ps1_core)
  add_test(NAME xa_audio_tests COMMAND xa_audio_tests)
+  if(WIN32)
+   if(TARGET avopsemu_capi)
+    add_executable(avopsemu_capi_abi_tests tests/capi_abi_tests.c)
+    set_target_properties(avopsemu_capi_abi_tests PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
+    target_include_directories(avopsemu_capi_abi_tests PRIVATE include)
+    target_link_libraries(avopsemu_capi_abi_tests PRIVATE avopsemu_capi)
+    add_test(NAME avopsemu_capi_abi_tests COMMAND avopsemu_capi_abi_tests)
+
+    add_executable(avopsemu_capi_lifecycle_tests tests/capi_lifecycle_tests.c)
+    set_target_properties(avopsemu_capi_lifecycle_tests PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
+    target_include_directories(avopsemu_capi_lifecycle_tests PRIVATE include)
+    target_link_libraries(avopsemu_capi_lifecycle_tests PRIVATE avopsemu_capi)
+    add_test(NAME avopsemu_capi_lifecycle_tests COMMAND avopsemu_capi_lifecycle_tests
+     ${CMAKE_CURRENT_SOURCE_DIR}/examples/boot_test_rom.bin
+     ${CMAKE_CURRENT_SOURCE_DIR}/examples/catch_stars.cue
+     ${CMAKE_CURRENT_SOURCE_DIR}/examples/homebrew.iso
+    )
+    set_tests_properties(avopsemu_capi_lifecycle_tests PROPERTIES TIMEOUT 60)
+
+    add_executable(avopsemu_capi_snapshot_tests tests/capi_snapshot_tests.c)
+    set_target_properties(avopsemu_capi_snapshot_tests PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
+    target_include_directories(avopsemu_capi_snapshot_tests PRIVATE include)
+    target_link_libraries(avopsemu_capi_snapshot_tests PRIVATE avopsemu_capi)
+    add_test(NAME avopsemu_capi_snapshot_tests COMMAND avopsemu_capi_snapshot_tests
+     ${CMAKE_CURRENT_SOURCE_DIR}/examples/homebrew.iso
+    )
+    set_tests_properties(avopsemu_capi_snapshot_tests PROPERTIES TIMEOUT 60)
+
+    add_executable(avopsemu_capi_input_audio_tests tests/capi_input_audio_tests.c)
+    set_target_properties(avopsemu_capi_input_audio_tests PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
+    target_include_directories(avopsemu_capi_input_audio_tests PRIVATE include)
+    target_link_libraries(avopsemu_capi_input_audio_tests PRIVATE avopsemu_capi)
+    add_test(NAME avopsemu_capi_input_audio_tests COMMAND avopsemu_capi_input_audio_tests
+     ${CMAKE_CURRENT_SOURCE_DIR}/examples/homebrew.iso
+    )
+    set_tests_properties(avopsemu_capi_input_audio_tests PROPERTIES TIMEOUT 60)
+
+    add_executable(avopsemu_capi_deployment_tests tests/capi_deployment_tests.c)
+    set_target_properties(avopsemu_capi_deployment_tests PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
+    target_include_directories(avopsemu_capi_deployment_tests PRIVATE include)
+    add_dependencies(avopsemu_capi_deployment_tests avopsemu_capi)
+    add_test(NAME avopsemu_capi_deployment_tests COMMAND avopsemu_capi_deployment_tests
+     "${CMAKE_CURRENT_SOURCE_DIR}/ui/AVOPSEMU.Wpf/bin/$<CONFIG>/net10.0-windows/avopsemu_capi.dll"
+    )
+    set_tests_properties(avopsemu_capi_deployment_tests PROPERTIES TIMEOUT 20)
+   endif()
+   add_executable(frontend_preferences_tests tests/frontend_preferences_tests.cpp)
+	target_link_libraries(frontend_preferences_tests PRIVATE avopsemu_frontend)
+	add_test(NAME frontend_preferences_tests COMMAND frontend_preferences_tests)
+	   add_executable(frontend_library_tests tests/frontend_library_tests.cpp)
+	target_link_libraries(frontend_library_tests PRIVATE avopsemu_frontend)
+	add_test(NAME frontend_library_tests COMMAND frontend_library_tests)
+   add_executable(crash_handler_probe tests/crash_handler_probe.cpp)
+   target_link_libraries(crash_handler_probe PRIVATE win_crash_diagnostics)
+   add_executable(crash_diagnostics_tests tests/crash_diagnostics_tests.cpp)
+   add_test(NAME crash_diagnostics_tests COMMAND crash_diagnostics_tests $<TARGET_FILE:crash_handler_probe>)
+   set_tests_properties(crash_diagnostics_tests PROPERTIES TIMEOUT 25)
+  endif()
 endif()
 
 if(BUILD_TESTING)
