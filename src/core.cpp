@@ -18,12 +18,12 @@ void Bus::sample_irq_lines(){
 }
 void Bus::tick_timers(){
  cd.clocks++;
- for(auto& port:sio){port.context_pc=writer_cpu?writer_pc:0;if(port.tx_busy||port.ack_delay||port.ack_width||port.irq_reassert)port.tick(cd.clocks);}
+ for(auto& port:sio)if(port.tx_busy||port.ack_delay||port.ack_width||port.irq_reassert){port.context_pc=writer_cpu?writer_pc:0;port.tick(cd.clocks);}
  if(dma[2].chop_wait)dma[2].chop_wait--;
  if(dma[3].chop_wait)dma[3].chop_wait--;
  if(dma[4].chop_wait)dma[4].chop_wait--;
  const unsigned sources=((timers[0].mode&0x100)?1:0)|(((timers[0].mode&1)||(timers[1].mode&0x100))?2:0);
- const bool vblank=gpu.tick_video(sources);if(vblank)irq_status|=1;
+ const bool vblank=gpu.tick_video(sources);if(vblank){irq0_latch_requests++;if(!(irq_status&1))irq0_latch_edges++;irq_status|=1;}
  sample_irq_lines();bool resample=false;
  if(cd.audio_start_delay||cd.irq_delay||cd.response_delay||cd.busy||cd.reading||!cd.events.empty()||!cd.pending.empty()){cd.tick();resample=true;}
  if(dma[3].control&(1u<<24)){run_dma(3);resample=true;}
@@ -150,7 +150,7 @@ void Cpu::reset(uint32_t entry) {
     clear_cpu_crash_context();
     gte=Gte{};first_fault=FaultSnapshot{};bios_system_error=false;
     bios_calls=0;last_bios_vector=last_bios_function=last_bios_return=0;last_bios_args.fill(0);
-    instructions=interrupts=reserved_exceptions=0;last_reserved_pc=last_reserved_opcode=0;trace.fill({});r.fill(0);cop0.fill(0);cop0[12]=0x00400000;cop0[15]=2;
+    instructions=interrupts=irq0_exceptions=reserved_exceptions=0;last_reserved_pc=last_reserved_opcode=0;trace.fill({});r.fill(0);cop0.fill(0);cop0[12]=0x00400000;cop0[15]=2;
     hi=lo=0;pc=entry;next_pc=entry+4;pending_reg=0;pending_value=0;delay_slot=false;branch_taken=false;
 }
 void Cpu::step() {
@@ -177,14 +177,15 @@ void Cpu::step() {
     cop0[13]=(cop0[13]&~0x400u)|((bus.irq_status&bus.irq_mask)?0x400u:0);
     if((cop0[12]&1)&&(cop0[12]&cop0[13]&0xff00)){
         if(pending_reg)r[pending_reg]=pending_value;
-        pending_reg=0;exception(0);interrupts++;return;
+        const bool irq0=(bus.irq_status&bus.irq_mask&1)!=0;
+        pending_reg=0;exception(0);bus.tick_timers();interrupts++;if(irq0)irq0_exceptions++;return;
     }
-    if((ip&3)||((cop0[12]&2)&&(ip&0x80000000u))){ if(pending_reg)r[pending_reg]=pending_value;pending_reg=0;cop0[8]=ip;exception(4);return; }
+    if((ip&3)||((cop0[12]&2)&&(ip&0x80000000u))){ if(pending_reg)r[pending_reg]=pending_value;pending_reg=0;cop0[8]=ip;exception(4);bus.tick_timers();return; }
     const uint32_t dcic=cop0[7];
     const uint32_t debug_mode=(cop0[12]&2)?0x40000000u:0x20000000u;
     if((dcic&0x01800000u)==0x01800000u&&(dcic&debug_mode)&&!((ip^cop0[3])&cop0[11])){
         cop0[7]|=3;
-        if(dcic&0x80000000u){if(pending_reg)r[pending_reg]=pending_value;pending_reg=0;exception(9,0,true);return;}
+        if(dcic&0x80000000u){if(pending_reg)r[pending_reg]=pending_value;pending_reg=0;exception(9,0,true);bus.tick_timers();return;}
     }
     const uint32_t vector=physical(ip);
     if(vector>=0xa0&&vector<=0xc0&&(vector&15)==0){
@@ -346,6 +347,7 @@ std::string Cpu::diagnostic()const{
  out<<bus.watch_diagnostic();
  for(unsigned i=0;i<3;i++)out<<"Timer"<<i<<" count="<<bus.timers[i].count<<" mode="<<bus.timers[i].mode<<" target="<<bus.timers[i].target<<"\n";
  out<<"CPU IRQ exceptions="<<std::dec<<interrupts<<" reserved_exceptions="<<reserved_exceptions<<" last_reserved_pc="<<std::hex<<last_reserved_pc<<" last_reserved_opcode="<<last_reserved_opcode<<"\n";
+ out<<"IRQ0 VBlank events="<<std::dec<<bus.gpu.vblank_events<<" latch_requests="<<bus.irq0_latch_requests<<" latch_edges="<<bus.irq0_latch_edges<<" ack_writes="<<bus.irq0_ack_writes<<" ack_clears="<<bus.irq0_ack_clears<<" CPU_exceptions="<<irq0_exceptions<<"\n";
  out<<"DPCR="<<std::hex<<bus.dpcr<<" DICR="<<bus.dicr<<" I_STAT="<<bus.irq_status<<" I_MASK="<<bus.irq_mask<<"\n";
  for(unsigned ch=0;ch<7;ch++){const auto& d=bus.dma[ch];if(d.chop_bursts||d.chop_wait)out<<"DMA chopping channel="<<ch<<" control="<<std::hex<<d.control<<" address="<<d.address<<" block="<<d.block<<" remaining="<<std::dec<<d.remaining<<" cpu_wait="<<d.chop_wait<<" bursts="<<d.chop_bursts<<"\n";}
  out<<"MDEC status="<<std::hex<<bus.mdec.status()<<" control="<<bus.mdec.control<<" command="<<bus.mdec.command<<" remaining="<<std::dec<<bus.mdec.remaining<<" input_halfwords="<<bus.mdec.input.size()<<" output_words="<<bus.mdec.output.size()<<" commands="<<bus.mdec.commands<<" decoded_macroblocks="<<bus.mdec.macroblocks<<" words_in="<<bus.mdec.words_in<<" words_out="<<bus.mdec.words_out<<" resets="<<bus.mdec.resets<<"\n";

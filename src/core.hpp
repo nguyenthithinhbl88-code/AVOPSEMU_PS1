@@ -27,6 +27,7 @@ struct Bus {
     mutable Cdrom cd;
     mutable std::array<Timer,3> timers{};
     uint16_t previous_irq_lines=0;
+    uint64_t irq0_latch_requests=0,irq0_latch_edges=0,irq0_ack_writes=0,irq0_ack_clears=0;
     void sample_irq_lines();
     void tick_timers();
     std::array<uint32_t,9> memory_control{};
@@ -69,7 +70,7 @@ struct Cpu {
     std::array<uint32_t,32> cop0{};
     Gte gte;
     bool delay_slot=false,branch_taken=false;
-    uint64_t instructions=0,interrupts=0,reserved_exceptions=0;
+    uint64_t instructions=0,interrupts=0,irq0_exceptions=0,reserved_exceptions=0;
     uint32_t last_reserved_pc=0,last_reserved_opcode=0;
     uint64_t bios_calls=0;
     uint32_t last_bios_vector=0,last_bios_function=0,last_bios_return=0;

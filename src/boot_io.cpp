@@ -19,7 +19,7 @@ bool Bus::boot_io_write(uint32_t address,uint8_t value){
  const uint32_t a=address&0x1fffffff;
  if(a>=0x1f801000&&a<0x1f801024){auto& reg=memory_control[(a-0x1f801000)/4];byte_write(reg,a&3);if(a<0x1f801008)reg=(reg&0xffffff)|0x1f000000;return true;}
  if(a>=0x1f801060&&a<0x1f801064){byte_write(ram_control,a&3);return true;}
- if(a>=0x1f801070&&a<0x1f801074){if(a==0x1f801070&&(irq_status&4)&&!(value&4))cd.record("host-ack",value);if(a<0x1f801072)irq_status&=uint16_t((uint16_t(value)<<((a&1)*8))|(a&1?0xff:0xff00));return true;}
+ if(a>=0x1f801070&&a<0x1f801074){if(a==0x1f801070){if((irq_status&4)&&!(value&4))cd.record("host-ack",value);if(!(value&1)){irq0_ack_writes++;if(irq_status&1)irq0_ack_clears++;}}if(a<0x1f801072)irq_status&=uint16_t((uint16_t(value)<<((a&1)*8))|(a&1?0xff:0xff00));return true;}
  if(a>=0x1f801074&&a<0x1f801078){if(a<0x1f801076){unsigned shift=(a&1)*8;irq_mask=uint16_t((irq_mask&~(255u<<shift))|(uint16_t(value)<<shift));irq_mask&=0x7ff;}return true;}
  if(a==0x1f802041){post=value;return true;}
  return false;
