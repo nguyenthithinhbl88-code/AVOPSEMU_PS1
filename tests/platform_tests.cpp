@@ -28,7 +28,10 @@ int main(){try{
  g.gp0(0x1f000000);b.irq_status=0;b.tick_timers();ck(b.irq_status&2);b.write32(0x1f801070,~2u);b.tick_timers();ck(!(b.irq_status&2));g.gp1(0x02000000);ck(!(g.status&(1u<<24)));
  // SIO0 disconnected response, mode/control/baud, acknowledge/reset.
  b.write16(0x1f801048,0x000d);b.write16(0x1f80104e,0x88);b.write16(0x1f80104a,0x0803);b.write8(0x1f801040,1);
- ck(b.read32(0x1f801044)&2);b.tick_timers();ck(b.irq_status&0x80);ck(b.read8(0x1f801040)==255&&!(b.read32(0x1f801044)&2));
+   ck(!(b.read32(0x1f801044)&2)&&!(b.read32(0x1f801044)&4));
+ for(unsigned t=0;t<0x88*8;t++)b.tick_timers();
+   ck((b.read32(0x1f801044)&7)==7);
+ b.tick_timers();ck(b.irq_status&0x80);ck(b.read8(0x1f801040)==255&&!(b.read32(0x1f801044)&2));
  b.write16(0x1f80104a,0x0813);ck(!(b.read32(0x1f801044)&512));b.write16(0x1f80104a,0x40);ck(b.read16(0x1f801048)==0&&b.read16(0x1f80104e)==0);
  std::cout<<"PASS: hardware/software CPU IRQ masks/vector/EPC/BD/load commit, DMA4/SPU wrap roundtrip/DICR, GPU readback/copy/DMA/info/IRQ, disconnected SIO\n";
  }catch(const std::exception&e){std::cerr<<e.what()<<'\n';return 1;}}

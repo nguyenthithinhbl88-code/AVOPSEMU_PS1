@@ -15,7 +15,8 @@ try {
  c.reset(0);c.r[8]=7;c.step();c.step();c.step();check(c.r[9]==7 && c.r[10]==42);
  // An explicit write in the delay slot wins over a preceding load.
  b.write32(4,0x24080009);c.reset(0);c.step();c.step();check(c.r[8]==9);
- b.write32(0,0x24000009);c.reset(0);c.step();check(c.r[0]==0);
+ b.write32(0,0x24000009);b.write32(4,0x3400ffff);b.write32(8,0x8c000100);b.write32(12,0x00000010);
+ c.reset(0);for(unsigned i=0;i<4;i++)c.step();check(c.r[0]==0);
  bool failed=false;try{b.read32(1);}catch(const std::runtime_error&){failed=true;}check(failed);
  failed=false;try{b.write8(0xbfc00000,1);}catch(const std::runtime_error&){failed=true;}check(failed);
  std::cout<<"PASS: demo, RAM aliases/endian, branch/load delays, zero register, bus guards\n";

@@ -39,6 +39,7 @@ int main(){try{
  ck(b.spu.ram[0]==12000&&int16_t(b.spu.ram[0x400/2])==-8000,"CD captures precede SPU gains");
  ck(b.spu.audio[0]==3000&&b.spu.audio[1]==-2000,"CD independent enable, signed CD gain and main volume");
  cd.reset_controller();ck(!cd.playing&&cd.cdda_frames==0&&cd.active_volume[0]==0,"reset clears PCM/matrix state");
+ b.cd.eject();//Windows keeps mounted BIN/CUE handles open, so release them before deleting the temp folder.
  std::filesystem::remove_all(dir);
  std::cout<<"PASS: original CUE PCM/track seek, ATV apply/cross/mono, mute, CDDA cadence, autopause/INT4, end-disc and CD-to-SPU capture/mix\n";
  }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

@@ -40,6 +40,7 @@ int main(){try{
  cd.write(0,3);cd.write(3,1);pcm=cd.audio_sample();ck(!pcm[0]&&!pcm[1]&&cd.xa.pcm.size()==2350,"ADPMUTE consumes XA without audible output");cd.write(3,0);cd.write(0,0);
  cd.sector_delay=0;cd.tick();ck(cd.flag==1&&cd.sector_buffer[0]==0x42,"interleaved data sector still delivered to CPU");
  cd.reset_controller();ck(cd.xa.pcm.empty()&&cd.xa.sectors==0,"reset discards stale stream/history");
+ b.cd.eject();//Windows keeps mounted BIN/CUE handles open, so release them before deleting the temp folder.
  std::filesystem::remove_all(dir);
  std::cout<<"PASS: XA 4/8-bit mono/stereo, 37800/18900 rates, predictors/sign/saturation, bounded queue, file/channel filter, interleaved data and mute\n";
  }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

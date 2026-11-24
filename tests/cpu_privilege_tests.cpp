@@ -23,7 +23,27 @@ int main(){try{
  for(unsigned reg:{0u,1u,2u,4u,10u}){setup(0x40020000|(reg<<11));c.cop0[12]=0;c.step();ck(((c.cop0[13]>>2)&31)==10,"missing PS1 COP0 registers raise RI");}
  setup(0x40028000);c.step();ck(!c.first_fault.valid,"garbage COP0 read keeps documented user-mode exception bypass");
  for(unsigned op:{48u,56u}){setup(instruction(op,1,2));c.step();ck(((c.cop0[13]>>2)&31)==11,"LWC0/SWC0 are CpU rather than RI");}
+	 // BC0 condition is false on PS1; rt bit 1 is ignored for F/T and both execute a delay slot.
+  for(unsigned rt=0;rt<4;rt++){
+   c.reset(0x1000);c.cop0[12]|=1u<<28;
+   b.write32(0x1000,instruction(16,8,rt,2));b.write32(0x1004,0x24080001);b.write32(0x1008,0x24090002);b.write32(0x100c,0x240a0003);
+   const bool taken=(rt&1)==0;c.step();
+   ck(c.delay_slot&&c.branch_taken==taken&&c.pc==0x1004,"BC0 rt decode and branch condition");
+   c.step();ck(c.r[8]==1&&c.pc==(taken?0x100c:0x1008),"BC0 delay slot and destination");
+   c.step();ck(taken?(c.r[10]==3&&c.r[9]==0):(c.r[9]==2&&c.r[10]==0),"BC0 taken/not-taken path");
+  }
+  // BC0 checks CU0 even in kernel mode, before attempting to branch.
+  c.reset(0x1000);c.cop0[12]=0;c.cop0[6]=0xdeadbeef;b.write32(0x1000,instruction(16,8,0,2));c.step();
+  ck(c.first_fault.valid&&c.first_fault.code==11&&((c.cop0[13]>>2)&31)==11&&!(c.cop0[13]&0x30000000u)&&c.cop0[14]==0x1000&&!(c.cop0[13]&0xc0000000u)&&c.cop0[6]==0xdeadbeef,"kernel BC0 without CU0 raises CpU");
+  // Exceptions in taken and untaken BC0 delay slots preserve EPC, BD/BT and TAR.
+  for(unsigned rt=2;rt<=3;rt++){
+   c.reset(0x1000);c.cop0[12]|=1u<<28;c.cop0[6]=0xdeadbeef;
+   b.write32(0x1000,instruction(16,8,rt,2));b.write32(0x1004,0xffffffff);
+   const bool taken=(rt&1)==0;c.step();c.step();const uint32_t cause=c.first_fault.cause;
+   ck(c.first_fault.in_delay&&c.first_fault.code==10&&c.first_fault.pc==0x1004&&c.first_fault.epc==0x1000&&c.cop0[14]==0x1000,"BC0 delay-slot EPC");
+   ck((cause&0x80000000u)&&(((cause&0x40000000u)!=0)==taken)&&c.cop0[6]==(taken?0x100c:0xdeadbeef),"BC0 delay-slot Cause.BD/BT and TAR");
+  }
  setup(instruction(50,1,2));c.step();ck(((c.cop0[13]>>2)&31)==11&&((c.cop0[13]>>28)&3)==2,"disabled COP2 has priority over its bad address");
  setup(0x10000001);b.write32(0x1004,instruction(35,1,2));c.step();c.step();ck(c.cop0[14]==0x1000&&(c.cop0[13]&0x80000000u),"delay-slot user load records branch EPC/BD");
- std::cout<<"PASS: PS1 user fetch/data permissions, isolated stores, COP0 permissions/RI, LWC0/SWC0, COP2 priority, pending load and delay-slot faults\n";
+	 std::cout<<"PASS: PS1 user fetch/data permissions, COP0 privilege/RI and BC0 branches, LWC0/SWC0, COP2 priority, pending load and delay-slot faults\n";
  }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

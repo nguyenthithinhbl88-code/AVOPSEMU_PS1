@@ -10,18 +10,22 @@ int main(){try{
  auto send=[&]{host.publish(keys.buttons());};
  keys.event('Z',true);send();keys.event('Z',false);send();
  ck(host.held_buttons()==0xffff&&host.pending_presses()==0x4000,"tap survives release before guest poll");
- auto b=std::make_unique<ps1::Bus>();auto& p=b->sio[0];p.connected=true;p.host_input=&host;
+   auto b=std::make_unique<ps1::Bus>();auto& p=b->sio[0];p.connected=true;p.host_input=&host;
+ b->write16(0x1f801048,0x0d);b->write16(0x1f80104e,0x88);
+ auto wait_byte=[&](bool ack){for(unsigned n=0;n<2000&&p.tx_busy;n++)b->tick_timers();ck(!p.tx_busy,"SIO byte transfer completes");if(ack){for(unsigned n=0;n<200&&!p.ack;n++)b->tick_timers();ck(p.ack,"controller ACK follows byte completion");}};
+ auto tx=[&](uint8_t v){const bool ack=p.connected&&(p.control&2)&&!(p.control&0x2000)&&((p.phase==0&&v==1)||(p.phase==1&&v==0x42)||p.phase==2||p.phase==3);b->write8(0x1f801040,v);wait_byte(ack);return b->read8(0x1f801040);};
  // An absent slot and memory-card probe must not consume a pending pad press.
  b->write16(0x1f80104a,0x3003);b->write8(0x1f801040,1);
  b->write16(0x1f80104a,1);b->write16(0x1f80104a,3);b->write8(0x1f801040,0x81);
  ck(host.pending_presses()==0x4000,"non-pad probes do not consume keyboard input");
  b->write16(0x1f80104a,0x40); // Flush probe replies before a new transaction.
+  b->write16(0x1f801048,0x0d);b->write16(0x1f80104e,0x88);
  // Actual MIPS-I MMIO instructions: select pad, issue 01/42/00/00/00,
  // read the button high byte, observe the load delay, store guest result.
  ps1::Cpu c(*b);c.reset(0x1000);c.r[1]=0x1f801040;c.r[2]=3;c.r[3]=1;c.r[4]=0x42;
  const uint32_t code[]={0xa422000a,0xa0230000,0xa0240000,0xa0200000,0xa0200000,0xa0200000,0x8c260000,0,0x90250000,0,0xac050200};
  for(unsigned i=0;i<11;i++){b->write32(0x1000+i*4,code[i]);}
- for(unsigned i=0;i<11;i++){c.step();}
+   for(unsigned i=0;i<11;i++){c.step();if(i>=1&&i<=5)wait_byte(i<5);}
  ck(b->read32(0x200)==0xbf&&p.last_pressed_buttons==0xbfff&&p.completed_polls==1,"quick keyboard Cross reaches guest CPU through SIO bytes");
  ck(host.pending_presses()==0&&host.consume_poll()==0xffff,"tap consumed once and released next poll");
  // Held buttons remain held through multiple polls; key repeat does not queue extras.
@@ -29,11 +33,10 @@ int main(){try{
  ck(host.pending_presses()==0&&host.consume_poll()==0xfff7,"held Start persists without repeat edges");
  keys.event(0x0d,false);send();ck(host.consume_poll()==0xffff,"Start releases after keyup");
  // Stable per-transfer snapshot, even if focus is lost between response bytes.
- keys.event('Z',true);keys.event(0x26,true);send();
- b->write16(0x1f80104a,1);b->write16(0x1f80104a,3);
- auto tx=[&](uint8_t v){b->write8(0x1f801040,v);return b->read8(0x1f801040);};
- ck(tx(1)==255&&tx(0x42)==0x41,"digital header");host.clear();keys.release();
- ck(tx(0)==0x5a&&tx(0)==0xef&&tx(0)==0xbf,"in-flight packet remains consistent after focus loss");
+  keys.event('Z',true);keys.event('X',true);keys.event(0x26,true);keys.event(0x28,true);send();
+	b->write16(0x1f80104a,1);b->write16(0x1f80104a,3);
+  ck(tx(1)==255&&tx(0x42)==0x41,"digital header");host.clear();keys.release();
+ ck(tx(0)==0x5a&&tx(0)==0xaf&&tx(0)==0x9f&&p.last_pressed_buttons==0x9faf,"active-low Up/Down/Circle/Cross survive focus loss until poll completion");
  ck(host.consume_poll()==0xffff&&!host.pending_presses(),"focus clear cancels future held and pending input");
  // Concurrent publisher/consumer must leave the final release intact, with
  // at most one coalesced pending edge (never a torn 16-bit button packet).

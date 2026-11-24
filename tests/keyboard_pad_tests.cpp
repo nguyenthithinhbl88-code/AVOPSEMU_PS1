@@ -8,12 +8,13 @@ int main(){try{
  for(unsigned n=0;n<16;n++)if(k.keys[n]){k.event(k.keys[n],true);ck(k.buttons()==uint16_t(0xffff^(1u<<n)),"each PS1 button bit");k.event(k.keys[n],false);}
  ck(!k.event('B',true)&&!k.event(999,true),"unbound keys ignored");
  k.event('Z',true);k.event(0x26,true);k.event('Q',true);k.event('Z',true);ck(k.buttons()==uint16_t(0xffff^0x4410),"held combo and repeat");ck(k.buttons(false)==0xffff,"focus gate releases");
- ps1::Bus b;auto& p=b.sio[0];p.connected=true;p.buttons=k.buttons();b.write16(0x1f80104a,0x1003);
+  ps1::Bus b;auto& p=b.sio[0];p.connected=true;p.buttons=k.buttons();b.write16(0x1f801048,0x0d);b.write16(0x1f80104e,0x88);b.write16(0x1f80104a,0x1003);
+ auto wait_byte=[&](bool ack){for(unsigned n=0;n<2000&&p.tx_busy;n++)b.tick_timers();ck(!p.tx_busy,"SIO byte transfer completes");if(ack){for(unsigned n=0;n<200&&!p.ack;n++)b.tick_timers();ck(p.ack,"controller ACK follows byte completion");}};
  const uint8_t tx[]={1,0x42,0,0,0};uint8_t rx[5]{};
- for(unsigned n=0;n<5;n++){b.write8(0x1f801040,tx[n]);rx[n]=b.read8(0x1f801040);if(n==1){k.release();p.buttons=k.buttons();}}
+  for(unsigned n=0;n<5;n++){b.write8(0x1f801040,tx[n]);wait_byte(n<4);rx[n]=b.read8(0x1f801040);if(n==1){k.release();p.buttons=k.buttons();}}
  ck(rx[0]==255&&rx[1]==0x41&&rx[2]==0x5a&&rx[3]==0xef&&rx[4]==0xbb,"keyboard combo reaches digital controller and transaction snapshot");
  b.write16(0x1f80104a,1);b.write16(0x1f80104a,0x1003);
- for(unsigned n=0;n<5;n++){b.write8(0x1f801040,tx[n]);rx[n]=b.read8(0x1f801040);}
+  for(unsigned n=0;n<5;n++){b.write8(0x1f801040,tx[n]);wait_byte(n<4);rx[n]=b.read8(0x1f801040);}
  ck(rx[3]==255&&rx[4]==255,"next poll sees released keys");
  // Recover missing native KEYDOWN and KEYUP events using a physical snapshot.
  k.sample([](unsigned key){return key=='Z'||key==0x26;},true);
@@ -22,7 +23,7 @@ int main(){try{
  bool queried=false;k.sample([&](unsigned){queried=true;return true;},false);ck(!queried&&k.buttons()==0xffff,"background never samples input and releases keys");
  const auto completed=p.completed_polls,pressed=p.pressed_polls;
  b.write16(0x1f80104a,1);b.write16(0x1f80104a,0x1003);p.buttons=0xbfff;
- for(auto value:tx){b.write8(0x1f801040,value);b.read8(0x1f801040);}
+  for(unsigned n=0;n<5;n++){b.write8(0x1f801040,tx[n]);wait_byte(n<4);b.read8(0x1f801040);}
  ck(p.completed_polls==completed+1&&p.pressed_polls==pressed+1&&p.last_pressed_buttons==0xbfff,"complete poll records button reply");
  p.buttons=0xffff;ck(p.last_pressed_buttons==0xbfff,"button evidence retained after host release/export");
  std::cout<<"PASS: every keyboard mapping, combos/repeat/focus/release physical polling recovery and actual SIO reply diagnostics\n";

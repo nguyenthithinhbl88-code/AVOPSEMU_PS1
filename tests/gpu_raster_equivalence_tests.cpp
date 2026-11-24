@@ -4,6 +4,7 @@
 #include <memory>
 #include <random>
 #include <stdexcept>
+#include <string>
 using ps1::Gpu;
 using Vertex=Gpu::Vertex;
 int64_t edge(const Vertex& a,const Vertex& b,const Vertex& p){return int64_t(b.x-a.x)*(p.y-a.y)-int64_t(b.y-a.y)*(p.x-a.x);}
@@ -34,7 +35,8 @@ int main(){try{
   a.left=int(rng()%20);a.top=int(rng()%20);a.right=45+int(rng()%40);a.bottom=45+int(rng()%40);
   a.draw_mode=rng()&0x3ff;a.texture_window=rng()&0xfffff;a.force_mask=test&1;a.check_mask=test&2;b=a;
   auto vertex=[&](){return Vertex{int(rng()%140)-30,int(rng()%140)-30,int(rng()%256),int(rng()%256),uint32_t(rng())};};
-  auto v0=vertex(),v1=vertex(),v2=vertex();if(test%3==0)v1.color=v2.color=v0.color;
+	 auto v0=vertex(),v1=vertex(),v2=vertex();if(test%3==0)v1.color=v2.color=v0.color;
+   if(test%5==0){v1.u=v2.u=v0.u;v1.v=v2.v=v0.v;}
   if(test%17==0)v2=v1;
   const auto clut=uint16_t(rng());const bool tex=test&4,raw=test&8,semi=test&16,dither=test&32;
   a.render_triangle(v0,v1,v2,clut,tex,raw,semi,dither);reference_triangle(b,v0,v1,v2,clut,tex,raw,semi,dither);

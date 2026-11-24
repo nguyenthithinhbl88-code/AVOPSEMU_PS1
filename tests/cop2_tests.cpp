@@ -26,10 +26,19 @@ int main(){try{
  b.write32(0x80000080,0x08000020);b.write32(0x80000084,0);for(unsigned i=0;i<2000;i++)c.step();
  ck(c.first_fault.pc==0x8004b70c&&c.first_fault.opcode==0xffffffff,"first fault not overwritten by later trace");
  c.reset(0x1000);c.cop0[12]|=1u<<30;code(0,0x4a000002);c.step();ck(c.first_fault.code==10&&c.first_fault.opcode==0x4a000002,"unsupported GTE opcode records exact fault");
- // Coprocessor branches have a real CPU branch delay slot.
- c.reset(0x1000);c.cop0[12]|=1u<<30;code(0,0x49000002);code(1,0x24080001);code(2,0x24080002);code(3,0x24090003);c.step();c.step();c.step();ck(c.r[8]==1&&c.r[9]==3,"BC2F always branches with delay slot");
- // Fault snapshots preserve the branch EPC and actual delay-slot opcode separately.
- c.reset(0x1000);code(0,0x10000002);code(1,0xffffffff);c.step();c.step();ck(c.first_fault.in_delay&&c.first_fault.pc==0x1004&&c.first_fault.epc==0x1000&&(c.first_fault.cause&0x80000000u),"delay-slot fault snapshot");
+	 // BC2 condition is false on PS1; rt bit 1 is ignored for F/T and both execute a delay slot.
+  for(unsigned rt=0;rt<4;rt++){
+   c.reset(0x1000);c.cop0[12]|=1u<<30;
+   code(0,cop(8,rt,0)|2);code(1,0x24080001);code(2,0x24090002);code(3,0x240a0003);
+   const bool taken=(rt&1)==0;c.step();
+   ck(c.delay_slot&&c.branch_taken==taken,"BC2 rt decode and branch condition");
+   c.step();ck(c.r[8]==1&&c.pc==(taken?0x100c:0x1008),"BC2 delay slot and destination");
+   c.step();ck(taken?(c.r[10]==3&&c.r[9]==0):(c.r[9]==2&&c.r[10]==0),"BC2 taken/not-taken path");
+  }
+  // A BC2F delay-slot fault records the branch EPC, BD/BT and target address.
+  c.reset(0x1000);c.cop0[12]|=1u<<30;c.cop0[6]=0xdeadbeef;code(0,cop(8,2,0)|2);code(1,0xffffffff);c.step();c.step();
+  ck(c.first_fault.in_delay&&c.first_fault.code==10&&c.first_fault.pc==0x1004&&c.first_fault.epc==0x1000&&c.cop0[14]==0x1000,"BC2 delay-slot EPC");
+  ck((c.first_fault.cause&0xc0000000u)==0xc0000000u&&c.cop0[6]==0x100c,"BC2 delay-slot Cause.BD/BT and TAR");
  c.reset(0x1000);code(0,0x44000000);c.step();ck(c.first_fault.code==11&&((c.cop0[13]>>28)&3)==1,"absent COP1 CE field");
  // Synthetic kernel routes a reserved instruction into BIOS SystemError A0(40).
  ps1::Bus fatal;ps1::Cpu f(fatal);f.reset(0x1000);f.cop0[12]=0;
@@ -41,5 +50,5 @@ int main(){try{
  runner.stop();ck(f.bios_system_error&&f.instructions<=10&&f.first_fault.pc==0x1000,"fatal BIOS loop pauses worker promptly");
  ck(runner.error().find("opcode=0xffffffff")!=std::string::npos&&f.diagnostic().find("FIRST CPU FAULT")!=std::string::npos,"fatal message and saved first opcode");
  f.reset();ck(!f.bios_system_error&&!f.first_fault.valid&&f.gte.commands==0,"reset clears fatal/snapshot/GTE state");
- std::cout<<"PASS: COP2 transfers/load delay, LWC2/SWC2, CU2/CE, alignment, commands, reported-PC regression, first-fault retention and BC2 branch delay\n";
+	 std::cout<<"PASS: COP2 transfers/load delay, CU2/CE, commands, BC2 rt variants, branch delay and fault EPC/BD/BT/TAR\n";
  }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}
