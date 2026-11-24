@@ -1,6 +1,7 @@
 #pragma once
 #include "gpu.hpp"
 #include <algorithm>
+#include <cstddef>
 namespace ps1 {
 // Functional presentation only: no video clocks, field timing or CRT overscan.
 struct DisplayView {unsigned x=0,y=0,width=320,height=240;bool rgb24=false,disabled=false;};
@@ -24,6 +25,29 @@ inline uint32_t display_pixel(const Gpu& gpu,const DisplayView& v,unsigned x,uns
  auto byte=[&](unsigned i){i&=2047;return unsigned(gpu.vram[row+i/2]>>((i&1)*8))&255;};
  const unsigned start=v.x*2+x*3;
  return (byte(start)<<16)|(byte(start+1)<<8)|byte(start+2);
+}
+inline void display_pixels(const Gpu& gpu,const DisplayView& view,uint32_t* output){
+ if(!view.width||!view.height)return;
+  const std::size_t pixel_count=std::size_t(view.width)*view.height;
+ if(view.disabled){std::fill_n(output,pixel_count,0u);return;}
+ if(!view.rgb24){
+  const unsigned start=view.x&1023,first=std::min(view.width,1024-start);
+  for(unsigned y=0;y<view.height;y++){
+   const auto* source=gpu.vram.data()+((view.y+y)&511)*1024;
+	  auto* destination=output+std::size_t(y)*view.width;
+   for(unsigned x=0;x<first;x++)destination[x]=Gpu::rgb555_to_rgb888(source[start+x]);
+   for(unsigned x=first;x<view.width;x++)destination[x]=Gpu::rgb555_to_rgb888(source[x-first]);
+  }
+  return;
+ }
+ for(unsigned y=0;y<view.height;y++){
+  const unsigned row=((view.y+y)&511)*1024;unsigned byte_index=(view.x*2)&2047;
+	auto* destination=output+std::size_t(y)*view.width;
+  for(unsigned x=0;x<view.width;x++){
+   const auto byte=[&](){const unsigned index=byte_index&2047;const unsigned value=(gpu.vram[row+(index>>1)]>>((index&1)*8))&255;++byte_index;return value;};
+   const unsigned r=byte(),g=byte(),b=byte();destination[x]=(r<<16)|(g<<8)|b;
+  }
+ }
 }
 inline void snapshot_display_vram(const Gpu& source,Gpu& snapshot,const DisplayView& view){
  if(view.disabled)return;

@@ -5,9 +5,20 @@
 #include <stdexcept>
 #include <sstream>
 #include <iomanip>
+#include <cstring>
+#ifdef AVOPSEMU_ENABLE_CPU_PROFILE
+#include "cpu_profile_simple.hpp"
+#endif
 namespace ps1 {
 static std::runtime_error bus_error(const char* operation,uint32_t a){std::ostringstream s;s<<operation<<" @ 0x"<<std::hex<<std::setw(8)<<std::setfill('0')<<a;return std::runtime_error(s.str());}
 static uint32_t physical(uint32_t a) { return a & 0x1fffffff; }
+static uint32_t load_le32(const uint8_t* data){
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+ return uint32_t(data[0])|(uint32_t(data[1])<<8)|(uint32_t(data[2])<<16)|(uint32_t(data[3])<<24);
+#else
+ uint32_t value;std::memcpy(&value,data,sizeof(value));return value;
+#endif
+}
 // Main RAM reads take 7 clocks including issue; Cpu::step already charges the issue clock.
 static unsigned main_ram_read_wait_cycles(uint32_t a) { return physical(a)<0x800000?6:0; }
 static bool timer_address(uint32_t a){a=physical(a);return a>=0x1f801100&&a<0x1f801130&&((a&15)==0||(a&15)==4||(a&15)==8);}
@@ -20,19 +31,25 @@ void Bus::sample_irq_lines(){
 }
 void Bus::tick_timers(){
  cd.clocks++;
- for(auto& port:sio)if(port.tx_busy||port.ack_delay||port.ack_width||port.irq_reassert){port.context_pc=writer_cpu?writer_pc:0;port.tick(cd.clocks);}
- if(dma[2].chop_wait)dma[2].chop_wait--;
- if(dma[3].chop_wait)dma[3].chop_wait--;
- if(dma[4].chop_wait)dma[4].chop_wait--;
+ for(auto& port:sio)if(port.tx_busy|bool(port.ack_delay)|bool(port.ack_width)|bool(port.irq_reassert)){port.context_pc=writer_cpu?writer_pc:0;port.tick(cd.clocks);}
+ if(dma[2].chop_wait|dma[3].chop_wait|dma[4].chop_wait){
+  if(dma[2].chop_wait)dma[2].chop_wait--;
+  if(dma[3].chop_wait)dma[3].chop_wait--;
+  if(dma[4].chop_wait)dma[4].chop_wait--;
+ }
  const unsigned sources=((timers[0].mode&0x100)?1:0)|(((timers[0].mode&1)||(timers[1].mode&0x100))?2:0);
  const bool vblank=gpu.tick_video(sources);if(vblank){irq0_latch_requests++;if(!(irq_status&1))irq0_latch_edges++;irq_status|=1;}
  sample_irq_lines();bool resample=false;
- if(cd.audio_start_delay||cd.irq_delay||cd.response_delay||cd.busy||cd.reading||!cd.events.empty()||!cd.pending.empty()){cd.tick();resample=true;}
- if(dma[3].control&(1u<<24)){run_dma(3);resample=true;}
- if(dma[0].control&(1u<<24)){run_dma(0);resample=true;}
- if(dma[1].control&(1u<<24)){run_dma(1);resample=true;}
- if((dma[2].control&0x1000100u)==0x1000100u){run_dma(2);resample=true;}
- if((dma[4].control&0x1000100u)==0x1000100u){run_dma(4);resample=true;}
+ const bool cd_active=bool(cd.audio_start_delay)|bool(cd.irq_delay)|bool(cd.response_delay)|cd.busy|cd.reading|!cd.events.empty()|!cd.pending.empty();
+ if(cd_active){cd.tick();resample=true;}
+ const bool dma_active=bool(dma[3].control&(1u<<24))|bool(dma[0].control&(1u<<24))|bool(dma[1].control&(1u<<24))|((dma[2].control&0x1000100u)==0x1000100u)|((dma[4].control&0x1000100u)==0x1000100u);
+ if(dma_active){
+  if(dma[3].control&(1u<<24)){run_dma(3);resample=true;}
+  if(dma[0].control&(1u<<24)){run_dma(0);resample=true;}
+  if(dma[1].control&(1u<<24)){run_dma(1);resample=true;}
+  if((dma[2].control&0x1000100u)==0x1000100u){run_dma(2);resample=true;}
+  if((dma[4].control&0x1000100u)==0x1000100u){run_dma(4);resample=true;}
+ }
  if(++spu.sample_clock==768){spu.sample_clock=0;const auto pcm=cd.audio_sample();spu.render_sample(pcm[0],pcm[1]);resample=true;}if(resample)sample_irq_lines();
  if(timers[0].tick(0,gpu.timer_dots,gpu.video_hblank,gpu.timer_hblank_rise))irq_status|=1u<<4;
  if(timers[1].tick(1,gpu.timer_hblank_rise?1:0,gpu.video_vblank,vblank))irq_status|=1u<<5;
@@ -93,8 +110,8 @@ uint32_t Bus::read32(uint32_t a) const {
     if(!(a&3)&&(physical(a)==0x1f801040||physical(a)==0x1f801050)){auto& port=sio[(physical(a)-0x1f801040)/16];port.clocks=cd.clocks;port.context_pc=writer_cpu?writer_pc:0;return port.read_data(4);}
     // CPU instruction fetches and ordinary RAM loads avoid four MMIO decodes.
     const uint32_t p=physical(a);
-    if(!(a&3)&&p<0x800000){const auto i=p&0x1fffff;return uint32_t(ram[i])|(uint32_t(ram[i+1])<<8)|(uint32_t(ram[i+2])<<16)|(uint32_t(ram[i+3])<<24);}
-    if(!(a&3)&&p>=0x1fc00000&&p<0x1fc80000){const auto i=p-0x1fc00000;return uint32_t(bios[i])|(uint32_t(bios[i+1])<<8)|(uint32_t(bios[i+2])<<16)|(uint32_t(bios[i+3])<<24);}
+     if(!(a&3)&&p<0x800000){const auto i=p&0x1fffff;return load_le32(ram.data()+i);}
+     if(!(a&3)&&p>=0x1fc00000&&p<0x1fc80000){const auto i=p-0x1fc00000;return load_le32(bios.data()+i);}
     if(!(a&3)&&p==0x1f801800){uint32_t value=0;const bool increment=memory_control[6]&0x2000;for(unsigned i=0;i<4;i++)value|=uint32_t(cd.read(increment?i:0))<<(i*8);return value;}
     if(timer_address(a))return read16(a);
     if(!(a&3)&&physical(a)>=0x1f801c00&&physical(a)<0x1f801e80)return uint32_t(read16(a))|(uint32_t(read16(a+2))<<16);
@@ -158,6 +175,10 @@ void Cpu::reset(uint32_t entry) {
 void Cpu::step() {
     struct WriterScope {Bus& b;~WriterScope(){b.writer_cpu=false;}} writer_scope{bus};
     bus.writer_cpu=false;
+#ifdef AVOPSEMU_ENABLE_CPU_PROFILE
+    const bool profile_sample=(instructions&4095u)==0;
+    if(profile_sample)cpu_profile.sampled_steps++;
+#endif
     const uint32_t ip=pc;
     const bool in_delay=delay_slot,taken_delay=delay_slot&&branch_taken;
     const uint32_t delay_target=next_pc;
@@ -202,14 +223,30 @@ void Cpu::step() {
     // Fetch RAM/BIOS directly after the architectural alignment/IRQ checks.
     // Other address regions retain the bus decoder and its explicit faults.
     auto word=[](const uint8_t* data){return uint32_t(data[0])|(uint32_t(data[1])<<8)|(uint32_t(data[2])<<16)|(uint32_t(data[3])<<24);};
-    const uint32_t ins=vector<0x800000?word(bus.ram.data()+(vector&0x1fffff)):
-        vector>=0x1fc00000&&vector<0x1fc80000?word(bus.bios.data()+vector-0x1fc00000):bus.read32(ip);
+#ifdef AVOPSEMU_ENABLE_CPU_PROFILE
+    const auto fetch_start=profile_sample?CpuProfileClock::now():CpuProfileClock::time_point{};
+#endif
+    const uint32_t ins=vector<0x800000?load_le32(bus.ram.data()+(vector&0x1fffff)):
+        vector>=0x1fc00000&&vector<0x1fc80000?load_le32(bus.bios.data()+vector-0x1fc00000):bus.read32(ip);
+#ifdef AVOPSEMU_ENABLE_CPU_PROFILE
+    if(profile_sample)cpu_profile.fetch_ns+=uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(CpuProfileClock::now()-fetch_start).count());
+    const auto trace_start=profile_sample?CpuProfileClock::now():CpuProfileClock::time_point{};
+#endif
     fetched_opcode=ins;has_opcode=true;record_cpu_crash_context(ip,ins);bus.writer_pc=ip;bus.writer_opcode=ins;bus.writer_instruction=instructions;bus.writer_cpu=true;
     trace[instructions%trace.size()]={ip,ins,r[(ins>>21)&31],r[(ins>>16)&31],pending_reg,pending_value};instructions++;
     // Observe BIOS putchar entry without replacing or skipping its instructions.
     if(((ip&0x1fffffff)==0xa0 && r[9]==0x3c)||((ip&0x1fffffff)==0xb0 && r[9]==0x3d))bus.append_tty(char(r[4]&255));
+#ifdef AVOPSEMU_ENABLE_CPU_PROFILE
+    if(profile_sample)cpu_profile.trace_ns+=uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(CpuProfileClock::now()-trace_start).count());
+#endif
+#ifdef AVOPSEMU_ENABLE_CPU_PROFILE
+    const auto decode_start=profile_sample?CpuProfileClock::now():CpuProfileClock::time_point{};
+#endif
     const unsigned op=ins>>26,s=(ins>>21)&31,t=(ins>>16)&31,d=(ins>>11)&31,sh=(ins>>6)&31;
     const uint32_t a=r[s],b=r[t],imm=uint32_t(int32_t(int16_t(ins&65535)));
+#ifdef AVOPSEMU_ENABLE_CPU_PROFILE
+    if(profile_sample){cpu_profile.decode_ns+=uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(CpuProfileClock::now()-decode_start).count());cpu_profile.sampled_opcodes[op]++;}
+#endif
     const unsigned old_pending=pending_reg;const uint32_t old_value=pending_value;
     if(pending_reg)r[pending_reg]=pending_value;
     pending_reg=0;pc=next_pc;next_pc=pc+4;delay_slot=false;branch_taken=false;
@@ -242,6 +279,9 @@ void Cpu::step() {
         else{cop0[8]=address;exception(memory_store?5:4);}
         r[0]=0;bus.tick_timers();return;
     }
+#ifdef AVOPSEMU_ENABLE_CPU_PROFILE
+    const auto execute_start=profile_sample?CpuProfileClock::now():CpuProfileClock::time_point{};
+#endif
     switch(op) {
     case 0:
         switch(ins&63) {
@@ -326,6 +366,9 @@ void Cpu::step() {
     }break;
     default:exception(10);break;
     }
+#ifdef AVOPSEMU_ENABLE_CPU_PROFILE
+    if(profile_sample)cpu_profile.execute_ns+=uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(CpuProfileClock::now()-execute_start).count());
+#endif
     r[0]=0;bus.tick_timers();for(unsigned cycle=0;cycle<extra_cycles;cycle++)bus.tick_timers();
 }
 std::string Cpu::failure_summary()const{
@@ -394,6 +437,11 @@ std::string Cpu::diagnostic()const{
  out<<bus.sio[0].diagnostic();
  out<<"GPUSTAT="<<std::hex<<bus.gpu.status<<" DrawMode="<<bus.gpu.draw_mode<<" TextureWindow="<<bus.gpu.texture_window<<" PacketWords="<<std::dec<<bus.gpu.count<<"\n";
  out<<"GPU words="<<bus.gpu.words<<" polygons="<<bus.gpu.polygons<<" rectangles="<<bus.gpu.rectangles<<" lines="<<bus.gpu.line_segments<<"\n";
+#ifdef AVOPSEMU_ENABLE_CPU_PROFILE
+   out<<"CPU_PROFILE sample_every=4096 sampled_steps="<<std::dec<<cpu_profile.sampled_steps<<" fetch_ns="<<cpu_profile.fetch_ns<<" trace_ns="<<cpu_profile.trace_ns<<" decode_ns="<<cpu_profile.decode_ns<<" execute_ns="<<cpu_profile.execute_ns<<" opcode_sample_counts=";
+  for(unsigned opcode=0;opcode<cpu_profile.sampled_opcodes.size();opcode++)if(cpu_profile.sampled_opcodes[opcode])out<<std::hex<<opcode<<":"<<std::dec<<cpu_profile.sampled_opcodes[opcode]<<" ";
+  out<<"\n";
+#endif
   out<<"GPU host rasterizer time ns="<<std::dec<<bus.gpu.raster_time_ns<<" (since GPU reset; host CPU time, not emulated GPU time)\n";
  out<<"Video line="<<std::dec<<bus.gpu.video_line<<" dot="<<bus.gpu.video_dot<<" field="<<bus.gpu.video_field<<" vblank="<<bus.gpu.video_vblank<<" frames="<<bus.gpu.video_frames<<" vblank_events="<<bus.gpu.vblank_events<<"\n";
  out<<"GPU display registers:";for(auto word:bus.gpu.display)out<<" "<<std::hex<<word;out<<"\n";

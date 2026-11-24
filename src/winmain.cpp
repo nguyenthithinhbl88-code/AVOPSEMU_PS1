@@ -661,7 +661,7 @@ LRESULT CALLBACK vramProc_impl(HWND w,UINT m,WPARAM wp,LPARAM lp){
   painted_words=bus->gpu.words;painted_display=bus->gpu.display_revision;painted_video=bus->gpu.video_frames;lock.unlock();
   presentation_pixels.resize(view.width*view.height);
   auto& pixels=presentation_pixels;
-  for(unsigned y=0;y<view.height;y++)for(unsigned x=0;x<view.width;x++)pixels[y*view.width+x]=ps1::display_pixel(presentation,view,x,y);
+   ps1::display_pixels(presentation,view,pixels.data());
   BITMAPINFO info{};info.bmiHeader.biSize=sizeof(BITMAPINFOHEADER);info.bmiHeader.biWidth=static_cast<LONG>(view.width);info.bmiHeader.biHeight=-static_cast<LONG>(view.height);
   info.bmiHeader.biPlanes=1;info.bmiHeader.biBitCount=32;info.bmiHeader.biCompression=BI_RGB;
   RECT r{};GetClientRect(w,&r);SetStretchBltMode(dc,COLORONCOLOR);

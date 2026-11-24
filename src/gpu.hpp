@@ -33,13 +33,13 @@ struct Gpu {
  std::array<uint32_t,4> display{};
  bool display_configured=false;
  bool horizontal_range_set=false,vertical_range_set=false;
-   unsigned hblank_start=608,hblank_end=3168;
+	unsigned hblank_start=608,hblank_end=3168;
  // Approximate video timing: one core instruction tick = one CPU clock.
  unsigned video_fraction=0,video_dot=0,video_line=0;
  bool video_field=false,video_vblank=true;
  uint64_t video_frames=0,vblank_events=0;
  void update_video_status();
-   void update_hblank_range();
+	void update_hblank_range();
  unsigned pixel_fraction=0,timer_dots=0;
  bool video_hblank=true,timer_hblank_rise=false;
  uint64_t display_revision=0;
@@ -54,6 +54,7 @@ struct Gpu {
  void gp0(uint32_t word);
  void gp1(uint32_t word);
  void reset();
+   static uint32_t rgb555_to_rgb888(uint16_t pixel);
  uint32_t rgb(unsigned x,unsigned y) const;
 };
 unsigned install_texture_demo(struct Bus& bus);

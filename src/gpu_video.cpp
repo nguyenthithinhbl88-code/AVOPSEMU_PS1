@@ -38,7 +38,7 @@ bool Gpu::tick_video(unsigned timer_sources){
   update_video_status();
  }
  if(timer_sources&2){
-	 video_hblank=hblank_end<=hblank_start||video_dot<hblank_start||video_dot>=hblank_end;
+   video_hblank=hblank_end<=hblank_start||video_dot<hblank_start||video_dot>=hblank_end;
   timer_hblank_rise=!was_hblank&&video_hblank;
  }
  const bool entered_blank=!was_vblank&&video_vblank;
