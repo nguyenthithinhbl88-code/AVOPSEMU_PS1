@@ -8,6 +8,8 @@
 namespace ps1 {
 static std::runtime_error bus_error(const char* operation,uint32_t a){std::ostringstream s;s<<operation<<" @ 0x"<<std::hex<<std::setw(8)<<std::setfill('0')<<a;return std::runtime_error(s.str());}
 static uint32_t physical(uint32_t a) { return a & 0x1fffffff; }
+// Main RAM reads take 7 clocks including issue; Cpu::step already charges the issue clock.
+static unsigned main_ram_read_wait_cycles(uint32_t a) { return physical(a)<0x800000?6:0; }
 static bool timer_address(uint32_t a){a=physical(a);return a>=0x1f801100&&a<0x1f801130&&((a&15)==0||(a&15)==4||(a&15)==8);}
 void Bus::sample_irq_lines(){
  uint16_t lines=(gpu.status&(1u<<24))?2:0;
@@ -230,6 +232,7 @@ void Cpu::step() {
     };
     auto aligned=[&](unsigned mask,bool store){if(address&mask){cop0[8]=address;exception(store?5:4);return false;}return true;};
     auto half=[&](){return uint32_t(bus.read16(address));};
+    unsigned extra_cycles=0;
     // KUc applies even to byte/unaligned transfers and isolated-cache stores.
     const bool memory_load=(op>=32&&op<=38)||op==50;
     const bool memory_store=(op>=40&&op<=43)||op==46||op==58;
@@ -267,6 +270,11 @@ void Cpu::step() {
     case 10:put(t,signed32(a)<signed32(imm));break;case 11:put(t,a<imm);break;
     case 12:put(t,a&(ins&65535));break;case 13:put(t,a|(ins&65535));break;case 14:put(t,a^(ins&65535));break;case 15:put(t,(ins&65535)<<16);break;
     case 16:
+        if(s==8&&(t<=3)){
+            if(!(cop0[12]&(1u<<28)))exception(11,0);
+            else branch((t&1)==0); // PS1 COP0 condition is false; rt bit 1 is ignored.
+            break;
+        }
         if((cop0[12]&2)&&!(cop0[12]&(1u<<28))&&!(s==0&&d>=16)){exception(11,0);break;}
         if(s==0){if(d==0||d==1||d==2||d==4||d==10)exception(10);else load(cop0[d]);}
         else if(s==4){
@@ -282,13 +290,13 @@ void Cpu::step() {
         else if(s==2)load(gte.read_control(d));
         else if(s==4)gte.write_data(d,b);
         else if(s==6)gte.write_control(d,b);
-        else if(s==8&&(t==0||t==1))branch(t==0); // BC2F always; BC2T never
+        else if(s==8&&t<=3)branch((t&1)==0); // BC2F always; BC2T never; rt bit 1 is ignored.
         else if(s>=16){if(!gte.execute(ins))exception(10);}
         else exception(10);
         break;
     case 50:
         if(!(cop0[12]&(1u<<30)))exception(11,2);
-        else if(aligned(3,false))gte.write_data(t,bus.read32(address));
+        else if(aligned(3,false)){extra_cycles=main_ram_read_wait_cycles(address);gte.write_data(t,bus.read32(address));}
         break;
     case 58:
         if(!(cop0[12]&(1u<<30)))exception(11,2);
@@ -296,11 +304,13 @@ void Cpu::step() {
         break;
     case 48:case 56:exception(11,0);break;
     case 17:case 19:case 49:case 51:case 57:case 59:exception(11,op&3);break;
-    case 32:load(uint32_t(int32_t(int8_t(bus.read8(address)))));break;
-    case 33:if(aligned(1,false))load(uint32_t(int32_t(int16_t(half()))));break;
-    case 35:if(aligned(3,false))load(bus.read32(address));break;
-    case 36:load(bus.read8(address));break;case 37:if(aligned(1,false))load(half());break;
+    case 32:extra_cycles=main_ram_read_wait_cycles(address);load(uint32_t(int32_t(int8_t(bus.read8(address)))));break;
+    case 33:if(aligned(1,false)){extra_cycles=main_ram_read_wait_cycles(address);load(uint32_t(int32_t(int16_t(half()))));}break;
+    case 35:if(aligned(3,false)){extra_cycles=main_ram_read_wait_cycles(address);load(bus.read32(address));}break;
+    case 36:extra_cycles=main_ram_read_wait_cycles(address);load(bus.read8(address));break;
+    case 37:if(aligned(1,false)){extra_cycles=main_ram_read_wait_cycles(address);load(half());}break;
     case 34:case 38:{
+        extra_cycles=main_ram_read_wait_cycles(address);
         const uint32_t word=bus.read32(address&~3u),previous=(old_pending==t&&t)?old_value:b;
         const unsigned n=address&3;
         if(op==34){unsigned shift=(3-n)*8;load((previous&(0x00ffffffu>>(n*8)))|(word<<shift));}
@@ -316,7 +326,7 @@ void Cpu::step() {
     }break;
     default:exception(10);break;
     }
-    r[0]=0;bus.tick_timers();
+    r[0]=0;bus.tick_timers();for(unsigned cycle=0;cycle<extra_cycles;cycle++)bus.tick_timers();
 }
 std::string Cpu::failure_summary()const{
  std::ostringstream out;out<<"BIOS SystemError A0(40)";
