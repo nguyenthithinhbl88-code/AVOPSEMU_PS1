@@ -40,8 +40,9 @@ inline void snapshot_display_vram(const Gpu& source,Gpu& snapshot,const DisplayV
  }
 }
 struct ViewRect {int x=0,y=0,width=0,height=0;};
-inline ViewRect fit_display(int width,int height){
+inline ViewRect fit_display(int width,int height,bool stretch=false){
  if(width<=0||height<=0)return {};
+  if(stretch)return {0,0,width,height};
  int w=width,h=width*3/4;if(h>height){h=height;w=height*4/3;}
  return {(width-w)/2,(height-h)/2,w,h};
 }

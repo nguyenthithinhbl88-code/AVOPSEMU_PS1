@@ -13,6 +13,16 @@ void Gpu::update_video_status(){
  const bool odd=!video_vblank&&(((display[3]&36)==36)?video_field:bool(video_line&1));
  status=(status&~0x80002000u)|(field_indicator?0x2000u:0)|(odd?0x80000000u:0);
 }
+void Gpu::update_hblank_range(){
+ const unsigned clocks=(display[3]&8)?3406:3413;
+ if(horizontal_range_set||display[1]){
+  hblank_start=std::min(display[1]&4095,clocks);
+  hblank_end=std::min((display[1]>>12)&4095,clocks);
+ }else{
+  hblank_start=608;
+  hblank_end=3168;
+ }
+}
 bool Gpu::tick_video(unsigned timer_sources){
  const bool was_hblank=video_hblank,was_vblank=video_vblank;
  timer_dots=0;timer_hblank_rise=false;
@@ -28,9 +38,7 @@ bool Gpu::tick_video(unsigned timer_sources){
   update_video_status();
  }
  if(timer_sources&2){
-  const unsigned start=(horizontal_range_set||display[1])?std::min(display[1]&4095,clocks):608;
-  const unsigned end=(horizontal_range_set||display[1])?std::min((display[1]>>12)&4095,clocks):3168;
-  video_hblank=end<=start||video_dot<start||video_dot>=end;
+	 video_hblank=hblank_end<=hblank_start||video_dot<hblank_start||video_dot>=hblank_end;
   timer_hblank_rise=!was_hblank&&video_hblank;
  }
  const bool entered_blank=!was_vblank&&video_vblank;

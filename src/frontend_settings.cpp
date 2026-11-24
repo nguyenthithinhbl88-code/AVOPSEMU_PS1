@@ -13,13 +13,14 @@ namespace avopsui {
 namespace {
 constexpr unsigned current_schema=1;
 constexpr wchar_t missing_value[]={1,0};
-constexpr const wchar_t* categories[]={L"CPU",L"GPU",L"CD-ROM",L"Audio",L"BIOS",L"Timing",L"Controller",L"Giao diện"};
+constexpr const wchar_t* categories[]={L"CPU",L"GPU",L"CD-ROM",L"Audio",L"BIOS",L"Timing",L"Controller",L"Display / Hiển thị",L"Giao diện"};
 constexpr unsigned category_count=sizeof(categories)/sizeof(categories[0]);
 constexpr int category_id=1000,theme_id=1100,accent_id=1101,font_id=1102;
 constexpr int toolbar_id=1110,status_id=1111,fps_id=1112,sidebar_id=1113,debugger_id=1114;
 constexpr int reset_ui_id=1120,export_id=1121,import_id=1122;
 constexpr int mute_id=1200,pace_id=1201,bios_id=1202;
 constexpr int default_keys_id=1300,wasd_keys_id=1301,neutral_id=1302,key_base_id=1320;
+constexpr int stretch_screen_id=1400,fullscreen_id=1401;
 constexpr int width=960,height=700;
 
 std::wstring win_error(const wchar_t* operation,DWORD code){
@@ -228,6 +229,14 @@ void build_page(WindowState& state){
 		}
 		add_label(state,L"Gamepad/analog input and per-game mapping profiles are not implemented.",490,40);
 		break;}
+	case 7:
+		add_label(state,L"Presentation settings affect only the host display; PS1 VRAM and framebuffer resolution stay unchanged.",82,42);
+		add_checkbox(state,L"Stretch Screen to fill the display area",stretch_screen_id,140,p.stretch_screen);
+		add_label(state,L"Off keeps the current 4:3 fit. On stretches the image to the full game-view area.",174,42);
+		add_checkbox(state,L"Fullscreen (borderless window)",fullscreen_id,238,p.fullscreen);
+		add_label(state,L"F11 toggles fullscreen; Escape exits fullscreen. Window size and maximized state are restored.",272,50);
+		break;
+	case 8:
 	default:
 		add_label(state,L"Theme",82);add_combo(state,theme_id,106,{L"Dark",L"Light",L"AMOLED"},static_cast<unsigned>(p.theme));
 		add_label(state,L"Accent color",150);add_combo(state,accent_id,174,{L"Violet",L"Blue",L"Green",L"Orange"},p.accent);
@@ -283,13 +292,15 @@ LRESULT CALLBACK settings_proc(HWND window,UINT message,WPARAM wp,LPARAM lp){
 		else if(id==fps_id)p.show_fps=SendMessageW(reinterpret_cast<HWND>(lp),BM_GETCHECK,0,0)==BST_CHECKED;
 		else if(id==sidebar_id)p.show_sidebar=SendMessageW(reinterpret_cast<HWND>(lp),BM_GETCHECK,0,0)==BST_CHECKED;
 		else if(id==debugger_id)p.show_debugger=SendMessageW(reinterpret_cast<HWND>(lp),BM_GETCHECK,0,0)==BST_CHECKED;
+		else if(id==stretch_screen_id)p.stretch_screen=SendMessageW(reinterpret_cast<HWND>(lp),BM_GETCHECK,0,0)==BST_CHECKED;
+		else if(id==fullscreen_id)p.fullscreen=SendMessageW(reinterpret_cast<HWND>(lp),BM_GETCHECK,0,0)==BST_CHECKED;
 		else if(id==mute_id)p.muted=SendMessageW(reinterpret_cast<HWND>(lp),BM_GETCHECK,0,0)==BST_CHECKED;
 		else if(id==pace_id)p.limit_speed=SendMessageW(reinterpret_cast<HWND>(lp),BM_GETCHECK,0,0)==BST_CHECKED;
 		else if(id==bios_id){if(state->actions.choose_bios)state->actions.choose_bios();build_page(*state);return 0;}
 		else if(id==default_keys_id){set_preset(p,false);apply_changes(*state);build_page(*state);return 0;}
 		else if(id==wasd_keys_id){set_preset(p,true);apply_changes(*state);build_page(*state);return 0;}
 		else if(id==neutral_id)p.neutral_opposites=SendMessageW(reinterpret_cast<HWND>(lp),BM_GETCHECK,0,0)==BST_CHECKED;
-		else if(id==reset_ui_id){const Preferences defaults{};p.theme=defaults.theme;p.accent=defaults.accent;p.font_size=defaults.font_size;p.show_toolbar=defaults.show_toolbar;p.show_status=defaults.show_status;p.show_fps=defaults.show_fps;p.show_sidebar=defaults.show_sidebar;p.show_debugger=defaults.show_debugger;p.window_width=defaults.window_width;p.window_height=defaults.window_height;p.window_maximized=defaults.window_maximized;apply_changes(*state);SetWindowPos(state->owner,nullptr,0,0,static_cast<int>(p.window_width),static_cast<int>(p.window_height),SWP_NOMOVE|SWP_NOZORDER|SWP_NOACTIVATE);ShowWindow(state->owner,p.window_maximized?SW_SHOWMAXIMIZED:SW_RESTORE);build_page(*state);return 0;}
+		else if(id==reset_ui_id){const Preferences defaults{};p.theme=defaults.theme;p.accent=defaults.accent;p.font_size=defaults.font_size;p.show_toolbar=defaults.show_toolbar;p.show_status=defaults.show_status;p.show_fps=defaults.show_fps;p.show_sidebar=defaults.show_sidebar;p.show_debugger=defaults.show_debugger;p.stretch_screen=defaults.stretch_screen;p.fullscreen=defaults.fullscreen;p.window_width=defaults.window_width;p.window_height=defaults.window_height;p.window_maximized=defaults.window_maximized;apply_changes(*state);SetWindowPos(state->owner,nullptr,0,0,static_cast<int>(p.window_width),static_cast<int>(p.window_height),SWP_NOMOVE|SWP_NOZORDER|SWP_NOACTIVATE);ShowWindow(state->owner,p.window_maximized?SW_SHOWMAXIMIZED:SW_RESTORE);build_page(*state);return 0;}
 		else if(id==export_id){export_profile(*state);return 0;}
 		else if(id==import_id){import_profile(*state);return 0;}
 		else if(id>=key_base_id&&id<key_base_id+16){const unsigned key=static_cast<unsigned>(id-key_base_id);if(key==1||key==2)return 0;state->listening_key=static_cast<int>(key);SetWindowTextW(reinterpret_cast<HWND>(lp),L"Press a key...");SetFocus(window);return 0;}
@@ -365,11 +376,13 @@ PreferenceLoadResult read_preferences(const std::filesystem::path& path,const st
 		   !read_boolean(source,L"UI",L"ShowFps",candidate.show_fps,candidate.show_fps,result.error)||
 		   !read_boolean(source,L"UI",L"ShowSidebar",candidate.show_sidebar,candidate.show_sidebar,result.error)||
 		   !read_boolean(source,L"UI",L"ShowDebugger",candidate.show_debugger,candidate.show_debugger,result.error)||
+		   !read_boolean(source,L"UI",L"StretchScreen",candidate.stretch_screen,candidate.stretch_screen,result.error)||
 		   !read_boolean(source,L"Hardware",L"LimitSpeed",candidate.limit_speed,candidate.limit_speed,result.error)||
 		   !read_boolean(source,L"Hardware",L"Muted",candidate.muted,candidate.muted,result.error)||
 		   !read_unsigned(source,L"Window",L"Width",candidate.window_width,1040,8192,candidate.window_width,result.error)||
 		   !read_unsigned(source,L"Window",L"Height",candidate.window_height,780,8192,candidate.window_height,result.error)||
 		   !read_boolean(source,L"Window",L"Maximized",candidate.window_maximized,candidate.window_maximized,result.error)||
+		   !read_boolean(source,L"Window",L"Fullscreen",candidate.fullscreen,candidate.fullscreen,result.error)||
 		   !read_keyboard(source,candidate,result.error))return result;
 		bool present=false;if(!read_text(source,L"Hardware",L"BiosPath",candidate.bios_path,present,result.error))return result;
 	}else if(!read_keyboard(source,candidate,result.error))return result;
@@ -389,10 +402,10 @@ bool write_preferences(const std::filesystem::path& path,const Preferences& valu
 	auto put=[&](const wchar_t* section,const wchar_t* key,const std::wstring& text){return write_profile_value(temporary,section,key,text,error);};
 	if(!put(L"Meta",L"SchemaVersion",number(current_schema))||
 	   !put(L"UI",L"Theme",number(static_cast<unsigned>(value.theme)))||!put(L"UI",L"Accent",number(value.accent))||!put(L"UI",L"FontSize",number(value.font_size))||
-	   !put(L"UI",L"ShowToolbar",boolean(value.show_toolbar))||!put(L"UI",L"ShowStatus",boolean(value.show_status))||!put(L"UI",L"ShowFps",boolean(value.show_fps))||!put(L"UI",L"ShowSidebar",boolean(value.show_sidebar))||!put(L"UI",L"ShowDebugger",boolean(value.show_debugger))||
+	   !put(L"UI",L"ShowToolbar",boolean(value.show_toolbar))||!put(L"UI",L"ShowStatus",boolean(value.show_status))||!put(L"UI",L"ShowFps",boolean(value.show_fps))||!put(L"UI",L"ShowSidebar",boolean(value.show_sidebar))||!put(L"UI",L"ShowDebugger",boolean(value.show_debugger))||!put(L"UI",L"StretchScreen",boolean(value.stretch_screen))||
 	   !put(L"Hardware",L"LimitSpeed",boolean(value.limit_speed))||!put(L"Hardware",L"Muted",boolean(value.muted))||!put(L"Hardware",L"BiosPath",value.bios_path)||
 	   !put(L"Keyboard",L"Wasd",boolean(value.wasd_profile))||!put(L"Keyboard",L"NeutralOpposites",boolean(value.neutral_opposites))||
-	   !put(L"Window",L"Width",number(value.window_width))||!put(L"Window",L"Height",number(value.window_height))||!put(L"Window",L"Maximized",boolean(value.window_maximized)))return false;
+	   !put(L"Window",L"Width",number(value.window_width))||!put(L"Window",L"Height",number(value.window_height))||!put(L"Window",L"Maximized",boolean(value.window_maximized))||!put(L"Window",L"Fullscreen",boolean(value.fullscreen)))return false;
 	for(unsigned i=0;i<value.keyboard_keys.size();i++)if(!put(L"Keyboard",(L"Key"+std::to_wstring(i)).c_str(),number(value.keyboard_keys[i])))return false;
 	if(!WritePrivateProfileStringW(nullptr,nullptr,nullptr,temporary.c_str())){
 		const DWORD code=GetLastError();

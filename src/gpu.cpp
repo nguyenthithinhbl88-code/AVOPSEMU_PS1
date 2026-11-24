@@ -5,7 +5,7 @@
 #include <algorithm>
 #include <sstream>
 namespace ps1 {
-void Gpu::reset(){display_revision++;pixel_fraction=timer_dots=0;video_hblank=true;timer_hblank_rise=false;read_w=read_h=read_index=read_latch=0;words=polygons=rectangles=line_segments=0;raster_time_ns=0;polyline_active=polyline_color_pending=false;history.fill(0);count=0;upload_w=upload_h=upload_index=0;status=0x14802000;draw_mode=texture_window=0;allow_texture_y512=false;display.fill(0);display_configured=false;horizontal_range_set=vertical_range_set=false;video_fraction=video_dot=video_line=0;video_field=false;video_vblank=true;video_frames=vblank_events=0;left=top=right=bottom=offset_x=offset_y=0;force_mask=check_mask=false;}
+void Gpu::reset(){display_revision++;pixel_fraction=timer_dots=0;video_hblank=true;timer_hblank_rise=false;read_w=read_h=read_index=read_latch=0;words=polygons=rectangles=line_segments=0;raster_time_ns=0;polyline_active=polyline_color_pending=false;history.fill(0);count=0;upload_w=upload_h=upload_index=0;status=0x14802000;draw_mode=texture_window=0;allow_texture_y512=false;display.fill(0);display_configured=false;horizontal_range_set=vertical_range_set=false;update_hblank_range();video_fraction=video_dot=video_line=0;video_field=false;video_vblank=true;video_frames=vblank_events=0;left=top=right=bottom=offset_x=offset_y=0;force_mask=check_mask=false;}
 uint32_t Gpu::rgb(unsigned x,unsigned y)const{
  const uint16_t c=vram[(y&511)*1024+(x&1023)];
  auto expand=[](unsigned v){return(v<<3)|(v>>2);};
@@ -19,15 +19,17 @@ void Gpu::gp1(uint32_t word){
   const bool extended=allow_texture_y512;
   reset();allow_texture_y512=extended; // GP1(09) is not reset by GP1(00).
   display[1]=0x00c00200;display[2]=0x00040010;
-  horizontal_range_set=vertical_range_set=display_configured=true;
+	horizontal_range_set=vertical_range_set=display_configured=true;
+  update_hblank_range();
   update_video_status();break;
  }
  case 1:polyline_active=polyline_color_pending=false;read_w=0;status&=~(1u<<27);count=0;upload_w=upload_h=upload_index=0;break;
  case 2:status&=~(1u<<24);break;
  case 3:status=(status&~(1u<<23))|((word&1)<<23);break;
- case 5:case 6:case 7:if((word>>24)==6)horizontal_range_set=true;if((word>>24)==7)vertical_range_set=true;display[(word>>24)-5]=word&0xffffff;display_configured=true;update_video_status();break;
+   case 5:case 6:case 7:if((word>>24)==6)horizontal_range_set=true;if((word>>24)==7)vertical_range_set=true;display[(word>>24)-5]=word&0xffffff;display_configured=true;if((word>>24)==6)update_hblank_range();update_video_status();break;
  case 8:
   display[3]=word&255;display_configured=true;
+	 update_hblank_range();
   status=(status&~0x007f4000u)|((word&0x3f)<<17)|((word&64)<<10)|((word&128)<<7);update_video_status();break;
  case 4:status=(status&~(3u<<29))|((word&3)<<29);break;
  case 9:allow_texture_y512=word&1;break;

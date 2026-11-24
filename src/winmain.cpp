@@ -37,6 +37,7 @@ bool limit_speed=true,muted=false;
 avopsui::Preferences preferences;
 std::filesystem::path preferences_path;
 HWND settings_button=nullptr,settings_window=nullptr,library_button=nullptr,library_window=nullptr;
+HMENU main_menu=nullptr;
 std::unique_ptr<avopsui::GameLibrary> game_library;
 std::filesystem::path game_library_path,current_disc_path;
 bool library_error_reported=false,game_booted=false;
@@ -53,6 +54,10 @@ ULONGLONG mouse_pad_until=0;
 bool input_focused=false;
 std::array<HWND,22> buttons{};
 bool large_view=false,debug_visible=false,show_welcome=true;
+bool fullscreen=false,windowed_placement_saved=false;
+WINDOWPLACEMENT windowed_placement{sizeof(WINDOWPLACEMENT)};
+LONG_PTR windowed_style=0,fullscreen_style=0;
+constexpr unsigned fullscreen_command=136;
 HFONT ui_font=nullptr,title_font=nullptr,small_font=nullptr;
 HBRUSH background_brush=nullptr,panel_brush=nullptr;
 void paint_shell(HWND w,HDC dc);
@@ -71,7 +76,15 @@ void save_keyboard(HWND w,bool=false){
  preferences.wasd_profile=wasd_profile;preferences.neutral_opposites=keyboard.neutral_opposites;preferences.keyboard_keys=keyboard.keys;persist_preferences(w);
 }
 void layout(HWND w){
- RECT r{};GetClientRect(w,&r);shell_layout=avopsui::layout(r.right,r.bottom,large_view,debug_visible);
+  RECT r{};GetClientRect(w,&r);
+  if(fullscreen){
+   for(auto button:buttons)ShowWindow(button,SW_HIDE);
+   if(settings_button)ShowWindow(settings_button,SW_HIDE);if(library_button)ShowWindow(library_button,SW_HIDE);
+   if(output)ShowWindow(output,SW_HIDE);if(pad_hint)ShowWindow(pad_hint,SW_HIDE);
+   if(screen){ShowWindow(screen,SW_SHOW);MoveWindow(screen,0,0,std::max(1L,r.right),std::max(1L,r.bottom),TRUE);}
+   InvalidateRect(w,nullptr,FALSE);if(screen)InvalidateRect(screen,nullptr,FALSE);return;
+  }
+  shell_layout=avopsui::layout(r.right,r.bottom,large_view,debug_visible);
  for(auto button:buttons)ShowWindow(button,SW_HIDE);
   if(settings_button)ShowWindow(settings_button,SW_HIDE);if(library_button)ShowWindow(library_button,SW_HIDE);
   const unsigned toolbar[]={1,11,15,4,5,21};
@@ -85,6 +98,87 @@ void layout(HWND w){
  ShowWindow(output,debug_visible?SW_SHOW:SW_HIDE);if(debug_visible)move(output,shell_layout.debug);
  move(screen,shell_layout.screen);move(pad_hint,shell_layout.hint);
  InvalidateRect(w,nullptr,FALSE);InvalidateRect(screen,nullptr,FALSE);
+}
+
+std::wstring display_api_error(const wchar_t* operation,DWORD code){
+ return std::wstring(operation)+L" failed (Windows error "+std::to_wstring(code)+L").";
+}
+void save_windowed_size(const WINDOWPLACEMENT& placement){
+ const LONG width=placement.rcNormalPosition.right-placement.rcNormalPosition.left;
+ const LONG height=placement.rcNormalPosition.bottom-placement.rcNormalPosition.top;
+ if(width>0&&height>0){preferences.window_width=static_cast<unsigned>(std::clamp(width,1040L,8192L));preferences.window_height=static_cast<unsigned>(std::clamp(height,780L,8192L));}
+ preferences.window_maximized=placement.showCmd==SW_SHOWMAXIMIZED;
+}
+bool set_window_style(HWND w,LONG_PTR style,std::wstring& error){
+ SetLastError(ERROR_SUCCESS);const LONG_PTR previous=SetWindowLongPtrW(w,GWL_STYLE,style);const DWORD code=GetLastError();
+ if(!previous&&code!=ERROR_SUCCESS){error=display_api_error(L"SetWindowLongPtrW",code);return false;}
+ return true;
+}
+bool position_fullscreen(HWND w,std::wstring& error){
+ const HMONITOR monitor=MonitorFromWindow(w,MONITOR_DEFAULTTONEAREST);MONITORINFO info{};info.cbSize=sizeof(info);
+ if(!monitor||!GetMonitorInfoW(monitor,&info)){error=display_api_error(L"GetMonitorInfoW",GetLastError());return false;}
+ if(!SetWindowPos(w,HWND_TOP,info.rcMonitor.left,info.rcMonitor.top,info.rcMonitor.right-info.rcMonitor.left,info.rcMonitor.bottom-info.rcMonitor.top,SWP_NOOWNERZORDER|SWP_FRAMECHANGED)){
+  error=display_api_error(L"SetWindowPos fullscreen",GetLastError());return false;
+ }
+ return true;
+}
+bool set_fullscreen_window(HWND w,bool enable,std::wstring& error){
+ if(fullscreen==enable)return true;
+ error.clear();
+ if(enable){
+  WINDOWPLACEMENT placement{};placement.length=sizeof(placement);
+  if(!GetWindowPlacement(w,&placement)){error=display_api_error(L"GetWindowPlacement",GetLastError());return false;}
+  SetLastError(ERROR_SUCCESS);const LONG_PTR style=GetWindowLongPtrW(w,GWL_STYLE);const DWORD style_error=GetLastError();
+  if(!style&&style_error!=ERROR_SUCCESS){error=display_api_error(L"GetWindowLongPtrW",style_error);return false;}
+    if(main_menu&&(!SetMenu(w,nullptr)||!DrawMenuBar(w))){error=display_api_error(L"SetMenu fullscreen",GetLastError());if(main_menu){SetMenu(w,main_menu);DrawMenuBar(w);}return false;}
+  windowed_style=style;
+  fullscreen_style=(style&~static_cast<LONG_PTR>(WS_OVERLAPPEDWINDOW|WS_MINIMIZE|WS_MAXIMIZE))|WS_POPUP|WS_CLIPCHILDREN;
+   if(!set_window_style(w,fullscreen_style,error)){
+     if(main_menu){SetMenu(w,main_menu);DrawMenuBar(w);}
+    return false;
+   }
+  if(!position_fullscreen(w,error)){
+   std::wstring rollback_error;
+    if(!set_window_style(w,windowed_style,rollback_error)||!SetWindowPlacement(w,&placement))win_diag::write_event("Fullscreen","Could not restore window style after a failed fullscreen transition",true);
+    if(main_menu){SetMenu(w,main_menu);DrawMenuBar(w);}
+   return false;
+  }
+  windowed_placement=placement;windowed_placement_saved=true;fullscreen=true;save_windowed_size(placement);
+  return true;
+ }
+ if(!windowed_placement_saved){error=L"No saved windowed placement is available.";return false;}
+ if(!set_window_style(w,windowed_style,error))return false;
+ if(!SetWindowPlacement(w,&windowed_placement)){
+  error=display_api_error(L"SetWindowPlacement",GetLastError());std::wstring rollback_error;
+  if(!set_window_style(w,fullscreen_style,rollback_error)||!position_fullscreen(w,rollback_error))win_diag::write_event("Fullscreen","Could not restore fullscreen after a failed window restore",true);
+  return false;
+ }
+ if(!SetWindowPos(w,nullptr,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOZORDER|SWP_NOOWNERZORDER|SWP_FRAMECHANGED)){
+  error=display_api_error(L"SetWindowPos restore",GetLastError());std::wstring rollback_error;
+  if(!set_window_style(w,fullscreen_style,rollback_error)||!position_fullscreen(w,rollback_error))win_diag::write_event("Fullscreen","Could not restore fullscreen after a failed frame refresh",true);
+  return false;
+ }
+ if(main_menu&&(!SetMenu(w,main_menu)||!DrawMenuBar(w))){
+  error=display_api_error(L"Restore menu bar",GetLastError());std::wstring rollback_error;
+  if(!set_window_style(w,fullscreen_style,rollback_error)||!position_fullscreen(w,rollback_error))win_diag::write_event("Fullscreen","Could not restore fullscreen after a menu failure",true);
+  SetMenu(w,nullptr);DrawMenuBar(w);return false;
+ }
+ fullscreen=false;windowed_placement_saved=false;
+ return true;
+}
+void show_fullscreen_error(HWND w,const std::wstring& error){
+ win_diag::write_event("Fullscreen","Window mode transition failed",true);
+ MessageBoxW(w,error.c_str(),L"AVOPSEMU display settings",MB_OK|MB_ICONERROR);
+}
+void toggle_fullscreen(HWND w){
+ std::wstring error;
+ if(!set_fullscreen_window(w,!fullscreen,error)){preferences.fullscreen=fullscreen;show_fullscreen_error(w,error);}
+ else preferences.fullscreen=fullscreen;
+ layout(w);
+ if(GetMenu(w))CheckMenuItem(GetMenu(w),fullscreen_command,MF_BYCOMMAND|(fullscreen?MF_CHECKED:MF_UNCHECKED));
+ if(screen)InvalidateRect(screen,nullptr,FALSE);
+ persist_preferences(w);
+ if(settings_window)avopsui::refresh_settings_window(settings_window,preferences.font_size);
 }
 
 HFONT font;
@@ -255,13 +349,17 @@ void rebuild_ui_resources(){
 void apply_preferences(HWND w){
  const bool restart=running&&limit_speed!=preferences.limit_speed;
  if(restart)stop(w);
+ if(w&&preferences.fullscreen!=fullscreen){
+  std::wstring error;
+  if(!set_fullscreen_window(w,preferences.fullscreen,error)){preferences.fullscreen=fullscreen;show_fullscreen_error(w,error);}
+ }
  limit_speed=preferences.limit_speed;muted=preferences.muted;wasd_profile=preferences.wasd_profile;
  keyboard.keys=preferences.keyboard_keys;keyboard.neutral_opposites=preferences.neutral_opposites;keyboard.release();host_pad.clear();
  large_view=!preferences.show_sidebar;debug_visible=preferences.show_debugger;toolbar_visible=preferences.show_toolbar;status_visible=preferences.show_status;fps_hud_visible=preferences.show_fps;
   avopsui::apply_palette(preferences.theme,preferences.accent);avopsui::set_game_library_font_size(preferences.font_size);rebuild_ui_resources();
  if(audio_output.ready())audio_output.set_muted(muted);
  if(w){SetWindowTextW(buttons[18],limit_speed?L"Tốc độ: 1x":L"Tốc độ: Max");SetWindowTextW(buttons[19],muted?L"Âm thanh: Tắt":L"Âm thanh: Bật");SetWindowTextW(buttons[13],large_view?L"Hiện thanh bên":L"Chế độ rạp");
-  if(GetMenu(w)){CheckMenuItem(GetMenu(w),123,MF_BYCOMMAND|(debug_visible?MF_CHECKED:MF_UNCHECKED));CheckMenuItem(GetMenu(w),114,MF_BYCOMMAND|(large_view?MF_CHECKED:MF_UNCHECKED));}
+   if(GetMenu(w)){CheckMenuItem(GetMenu(w),123,MF_BYCOMMAND|(debug_visible?MF_CHECKED:MF_UNCHECKED));CheckMenuItem(GetMenu(w),114,MF_BYCOMMAND|(large_view?MF_CHECKED:MF_UNCHECKED));CheckMenuItem(GetMenu(w),fullscreen_command,MF_BYCOMMAND|(fullscreen?MF_CHECKED:MF_UNCHECKED));}
   update_pad(w);layout(w);
  }
  if(restart)start_run(w);else if(w)refresh();
@@ -415,7 +513,7 @@ LRESULT CALLBACK proc_impl(HWND w,UINT m,WPARAM wp,LPARAM lp){
   SendMessageW(pad_hint,WM_SETFONT,reinterpret_cast<WPARAM>(small_font),TRUE);
   HMENU menu=CreateMenu(),file=CreatePopupMenu(),view=CreatePopupMenu(),tools=CreatePopupMenu();
     AppendMenuW(file,MF_STRING,135,L"Game Library...");AppendMenuW(file,MF_STRING,102,L"Nạp BIOS PS1...");AppendMenuW(file,MF_STRING,112,L"Mở đĩa BIN / CUE / ISO...");AppendMenuW(file,MF_STRING,116,L"Boot đĩa qua BIOS");AppendMenuW(file,MF_STRING,109,L"Mở homebrew EXE...");AppendMenuW(file,MF_STRING,111,L"Lưu log + ảnh VRAM...");AppendMenuW(file,MF_STRING,133,L"Chụp tự động vào AppData (không hộp thoại)");AppendMenuW(file,MF_STRING,124,L"Thoát");
-  AppendMenuW(view,MF_STRING,123,L"Bật / tắt debugger   F9");AppendMenuW(view,MF_STRING,114,L"Bật / tắt chế độ rạp   F11");AppendMenuW(view,MF_STRING,122,L"Hướng dẫn bàn phím");
+   AppendMenuW(view,MF_STRING,123,L"Bật / tắt debugger   F9");AppendMenuW(view,MF_STRING,114,L"Bật / tắt chế độ rạp");AppendMenuW(view,MF_STRING,fullscreen_command,L"Toàn màn hình   F11");AppendMenuW(view,MF_STRING,122,L"Hướng dẫn bàn phím");
   AppendMenuW(view,MF_STRING,129,L"Thử giữ Cross trong 1 giây");
   AppendMenuW(view,MF_STRING,130,L"Thử giữ Start trong 1 giây");
   AppendMenuW(view,MF_STRING|(!wasd_profile?MF_CHECKED:0),126,L"Bàn phím: Mũi tên + Z/X/A/S");
@@ -426,8 +524,8 @@ LRESULT CALLBACK proc_impl(HWND w,UINT m,WPARAM wp,LPARAM lp){
   for(unsigned n=0;n<11;n++)AppendMenuW(tools,MF_STRING,ids[n],names[n]);
   
    AppendMenuW(tools,MF_STRING,134,L"Settings Center...");
-   AppendMenuW(menu,MF_POPUP,reinterpret_cast<UINT_PTR>(file),L"Tệp");AppendMenuW(menu,MF_POPUP,reinterpret_cast<UINT_PTR>(view),L"Hiển thị");AppendMenuW(menu,MF_POPUP,reinterpret_cast<UINT_PTR>(tools),L"Công cụ");AppendMenuW(view,MF_STRING,131,L"Màn hình chào");AppendMenuW(view,MF_STRING,132,L"Về AVOPSEMU");SetMenu(w,menu);
-   CheckMenuItem(menu,123,MF_BYCOMMAND|(debug_visible?MF_CHECKED:MF_UNCHECKED));CheckMenuItem(menu,114,MF_BYCOMMAND|(large_view?MF_CHECKED:MF_UNCHECKED));
+    AppendMenuW(menu,MF_POPUP,reinterpret_cast<UINT_PTR>(file),L"Tệp");AppendMenuW(menu,MF_POPUP,reinterpret_cast<UINT_PTR>(view),L"Hiển thị");AppendMenuW(menu,MF_POPUP,reinterpret_cast<UINT_PTR>(tools),L"Công cụ");AppendMenuW(view,MF_STRING,131,L"Màn hình chào");AppendMenuW(view,MF_STRING,132,L"Về AVOPSEMU");SetMenu(w,menu);main_menu=menu;
+    CheckMenuItem(menu,123,MF_BYCOMMAND|(debug_visible?MF_CHECKED:MF_UNCHECKED));CheckMenuItem(menu,114,MF_BYCOMMAND|(large_view?MF_CHECKED:MF_UNCHECKED));CheckMenuItem(menu,fullscreen_command,MF_BYCOMMAND|(fullscreen?MF_CHECKED:MF_UNCHECKED));
    SetWindowTextW(buttons[18],limit_speed?L"Tốc độ: 1x":L"Tốc độ: Max");SetWindowTextW(buttons[19],muted?L"Âm thanh: Tắt":L"Âm thanh: Bật");SetWindowTextW(buttons[13],large_view?L"Hiện thanh bên":L"Chế độ rạp");
     SendMessageW(output,WM_SETFONT,reinterpret_cast<WPARAM>(font),TRUE);SetTimer(w,2,8,nullptr);if(!SetTimer(w,3,5000,nullptr)){const auto message="Periodic log flush timer GetLastError="+std::to_string(GetLastError());win_diag::write_event("Diagnostics",message.c_str(),true);}if(!SetTimer(w,4,30000,nullptr))win_diag::write_event("Game library","Could not create the periodic library checkpoint timer",true);layout(w);refresh();return 0;}
  case WM_ERASEBKGND:return 1;
@@ -443,7 +541,8 @@ LRESULT CALLBACK proc_impl(HWND w,UINT m,WPARAM wp,LPARAM lp){
   wchar_t text[128]{};GetWindowTextW(item->hwndItem,text,128);ps1ui::label(item->hDC,text,r,ui_font,primary?ps1ui::background:ps1ui::text,DT_CENTER|DT_VCENTER|DT_SINGLELINE);
   if(item->itemState&ODS_FOCUS){InflateRect(&r,-4,-4);DrawFocusRect(item->hDC,&r);}return TRUE;}
  case WM_ACTIVATEAPP:if(!wp){keyboard.release();host_pad.clear();mouse_pad_buttons=0xffff;}return 0;
- case WM_SIZE:if(output&&screen)layout(w);return 0;
+  case WM_SIZE:if(output&&screen)layout(w);return 0;
+  case WM_DISPLAYCHANGE:if(fullscreen){std::wstring error;if(!position_fullscreen(w,error))show_fullscreen_error(w,error);}if(output&&screen)layout(w);return 0;
  case WM_GETMINMAXINFO:{auto p=reinterpret_cast<MINMAXINFO*>(lp);p->ptMinTrackSize={1040,780};return 0;}
  case WM_COMMAND:
   switch(LOWORD(wp)){
@@ -459,11 +558,12 @@ LRESULT CALLBACK proc_impl(HWND w,UINT m,WPARAM wp,LPARAM lp){
     case 123:debug_visible=!debug_visible;preferences.show_debugger=debug_visible;CheckMenuItem(GetMenu(w),123,MF_BYCOMMAND|(debug_visible?MF_CHECKED:MF_UNCHECKED));layout(w);persist_preferences(w);refresh();if(settings_window)avopsui::refresh_settings_window(settings_window,preferences.font_size);break;
    case 124:DestroyWindow(w);break;
    case 131:stop(w);show_welcome=true;status=L"Màn hình chào • Phiên chơi được giữ lại. Bấm Chạy để tiếp tục.";refresh();break;
-   case 132:MessageBoxW(w,L"AVOPSEMU PS1 v51\nGiả lập PlayStation — C++17 / Win32\n\nPS1: CPU, GPU, CD-ROM, SPU và digital pad.\nPS2 đã được tách thành dự án AVOPSEMU_PS2 riêng.\n\nF5: Chạy / Tạm dừng\nF9: Debugger\nF11: Chế độ rạp\n\nKhả năng tương thích game vẫn đang được phát triển.",L"Về AVOPSEMU",MB_OK|MB_ICONINFORMATION);break;
+  case 132:MessageBoxW(w,L"AVOPSEMU PS1 v51\nGiả lập PlayStation — C++17 / Win32\n\nPS1: CPU, GPU, CD-ROM, SPU và digital pad.\nPS2 đã được tách thành dự án AVOPSEMU_PS2 riêng.\n\nF5: Chạy / Tạm dừng\nF9: Debugger\nF11: Toàn màn hình\nEscape: Thoát toàn màn hình\n\nKhả năng tương thích game vẫn đang được phát triển.",L"Về AVOPSEMU",MB_OK|MB_ICONINFORMATION);break;
    case 122:{keyboard.release();update_pad(w);MessageBoxW(w,L"Digital Pad 1 - ban phim\n\nHiển thị > Bàn phím để đổi preset. WASD preset: WASD di chuyen; J/K/U/I = Cross/Circle/Square/Triangle; Q/E = L1/R1; 1/3 = L2/R2; Tab = Select.\n\nPreset mac dinh:\nMui ten: D-pad\nZ: Cross (X) - chức năng tùy game\nX: Circle (O)\nA: Square\nS: Triangle\nEnter: Start / Pause trong game\nShift: Select\nQ / W: L1 / R1\nE / R: L2 / R2\n\nBam vao man hinh game truoc khi choi. Giu nhieu phim cung luc duoc.\nAlt-Tab se nha tat ca nut. Day la digital pad, chua co analog/rung.",L"AVOPSEMU — Bàn phím PS1",MB_OK);SetFocus(screen);break;}
 
    case 115:{stop(w,true);game_booted=false;current_disc_path.clear();exe_loaded=false;entry=0;const auto n=ps1::install_texture_demo(*bus);cpu->reset(0);advance(w,n);status=L"Texture demo: CPU upload -> textured quads, modulation, sprite va blend.";refresh();break;}
-    case 114:large_view=!large_view;preferences.show_sidebar=!large_view;SetWindowTextW(buttons[13],large_view?L"Hiện thanh bên":L"Chế độ rạp");layout(w);persist_preferences(w);break;
+     case 114:large_view=!large_view;preferences.show_sidebar=!large_view;SetWindowTextW(buttons[13],large_view?L"Hiện thanh bên":L"Chế độ rạp");layout(w);persist_preferences(w);break;
+     case 136:toggle_fullscreen(w);break;
    case 101:stop(w,true);game_booted=false;current_disc_path.clear();exe_loaded=false;entry=0;ps1::install_demo(*bus);cpu->reset(entry);advance(w,4);status=L"Demo hoan tat: 7 + 5 = 12. Xem RAM[0x100].";refresh();break;
    case 112:mountIso(w);break;
     case 113:{stop(w,true);try{ps1::boot_disc(*bus,*cpu,true);game_booted=true;entry=cpu->pc;initial_regs=cpu->r;exe_loaded=true;last_fault.clear();start_perf();status=L"Homebrew EXE loaded. KHONG co kernel BIOS. Game thuong mai: Nap BIOS -> Boot Game CD -> Run.";}catch(const std::exception&e){win_diag::write_event("Direct disc boot",e.what(),true);std::string msg=e.what();status=std::wstring(msg.begin(),msg.end());}refresh();break;}
@@ -521,7 +621,11 @@ LRESULT CALLBACK proc_impl(HWND w,UINT m,WPARAM wp,LPARAM lp){
   if(changed&&!IsIconic(w))InvalidateRect(screen,nullptr,FALSE);
   if(GetTickCount64()-last_refresh>=250){refresh();last_refresh=GetTickCount64();}
  }return 0;
-  case WM_DESTROY:{KillTimer(w,2);KillTimer(w,3);KillTimer(w,4);if(library_window&&IsWindow(library_window))DestroyWindow(library_window);if(settings_window&&IsWindow(settings_window))DestroyWindow(settings_window);stop(w,true);persist_library(w);if(IsZoomed(w))preferences.window_maximized=true;else{preferences.window_maximized=false;RECT bounds{};if(GetWindowRect(w,&bounds)){preferences.window_width=static_cast<unsigned>(std::clamp(bounds.right-bounds.left,1040L,8192L));preferences.window_height=static_cast<unsigned>(std::clamp(bounds.bottom-bounds.top,780L,8192L));}}persist_preferences(w);win_diag::flush();PostQuitMessage(0);return 0;}
+  case WM_DESTROY:{
+    KillTimer(w,2);KillTimer(w,3);KillTimer(w,4);if(library_window&&IsWindow(library_window))DestroyWindow(library_window);if(settings_window&&IsWindow(settings_window))DestroyWindow(settings_window);stop(w,true);persist_library(w);
+    if(main_menu){if(GetMenu(w)==main_menu)SetMenu(w,nullptr);DestroyMenu(main_menu);main_menu=nullptr;}
+   if(!fullscreen){WINDOWPLACEMENT placement{};placement.length=sizeof(placement);if(GetWindowPlacement(w,&placement))save_windowed_size(placement);else win_diag::write_event("Window placement","Could not save normal window placement",true);}
+   persist_preferences(w);win_diag::flush();PostQuitMessage(0);return 0;}
  }return DefWindowProcW(w,m,wp,lp);
  }
 }
@@ -534,7 +638,7 @@ LRESULT CALLBACK proc(HWND w,UINT m,WPARAM wp,LPARAM lp) noexcept{
 }
 LRESULT CALLBACK vramProc_impl(HWND w,UINT m,WPARAM wp,LPARAM lp){
  if(m==WM_LBUTTONDOWN){SetFocus(w);return 0;}
- if(m==WM_KEYDOWN&&wp==VK_ESCAPE){SendMessageW(GetParent(w),WM_COMMAND,106,0);return 0;}
+ if(m==WM_KEYDOWN&&wp==VK_ESCAPE){SendMessageW(GetParent(w),WM_COMMAND,fullscreen?fullscreen_command:106,0);return 0;}
  if(m==WM_PAINT){
    const auto paint_start=PerfClock::now();
   PAINTSTRUCT paint{};HDC dc=BeginPaint(w,&paint);
@@ -562,7 +666,7 @@ LRESULT CALLBACK vramProc_impl(HWND w,UINT m,WPARAM wp,LPARAM lp){
   info.bmiHeader.biPlanes=1;info.bmiHeader.biBitCount=32;info.bmiHeader.biCompression=BI_RGB;
   RECT r{};GetClientRect(w,&r);SetStretchBltMode(dc,COLORONCOLOR);
   FillRect(dc,&r,static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
-  const auto dest=ps1::fit_display(r.right,r.bottom);
+   const auto dest=ps1::fit_display(r.right,r.bottom,preferences.stretch_screen);
    bool submitted=false;
    if(dest.width>0&&dest.height>0)submitted=StretchDIBits(dc,dest.x,dest.y,dest.width,dest.height,0,0,static_cast<int>(view.width),static_cast<int>(view.height),pixels.data(),&info,DIB_RGB_COLORS,SRCCOPY)!=GDI_ERROR;
    EndPaint(w,&paint);
@@ -613,13 +717,17 @@ int run_gui(HINSTANCE h,int show){
  if(!RegisterClassW(&v))return 1;
  if(!RegisterClassW(&c))return 1;
   HWND w=CreateWindowW(c.lpszClassName,L"AVOPSEMU PS1 v51 — PlayStation / PS1",WS_OVERLAPPEDWINDOW|WS_CLIPCHILDREN,CW_USEDEFAULT,CW_USEDEFAULT,static_cast<int>(preferences.window_width),static_cast<int>(preferences.window_height),nullptr,nullptr,h,nullptr);
-  if(!w)return 1;ShowWindow(w,preferences.window_maximized?SW_SHOWMAXIMIZED:show);MSG msg{};int result;
+   if(!w)return 1;ShowWindow(w,preferences.window_maximized?SW_SHOWMAXIMIZED:show);
+   if(preferences.fullscreen)toggle_fullscreen(w);
+   MSG msg{};int result;
  while((result=GetMessageW(&msg,nullptr,0,0))>0){
+   const HWND key_root=GetAncestor(msg.hwnd,GA_ROOT);
+   if(msg.message==WM_KEYDOWN&&(key_root==w||key_root==settings_window)&&!(msg.lParam&(LPARAM(1)<<30))&&(msg.wParam==VK_F11||(msg.wParam==VK_ESCAPE&&fullscreen))){SendMessageW(w,WM_COMMAND,fullscreen_command,0);continue;}
   if((msg.message==WM_KEYDOWN||msg.message==WM_KEYUP)&&GetAncestor(msg.hwnd,GA_ROOT)==w){
    if(keyboard.event(unsigned(msg.wParam),msg.message==WM_KEYDOWN)){input_events++;update_pad(w);continue;}
   }
   if(msg.message==WM_KEYDOWN&&GetAncestor(msg.hwnd,GA_ROOT)==w&&!(msg.lParam&(LPARAM(1)<<30))){
-   const unsigned command=msg.wParam==VK_F5?(running?106:105):msg.wParam==VK_F9?123:msg.wParam==VK_F11?114:0;
+    const unsigned command=msg.wParam==VK_F5?(running?106:105):msg.wParam==VK_F9?123:0;
    if(command){SendMessageW(w,WM_COMMAND,command,0);continue;}
   }
   TranslateMessage(&msg);DispatchMessageW(&msg);
