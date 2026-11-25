@@ -4,6 +4,9 @@
 #include <algorithm>
 #include <cerrno>
 #include <cwchar>
+#include <cwctype>
+#include <iomanip>
+#include <iterator>
 #include <sstream>
 #include <stdexcept>
 #include <utility>
@@ -11,7 +14,7 @@
 
 namespace avopsui {
 namespace {
-constexpr unsigned current_schema=1;
+constexpr unsigned current_schema=2;
 constexpr wchar_t missing_value[]={1,0};
 constexpr const wchar_t* categories[]={L"CPU",L"GPU",L"CD-ROM",L"Audio",L"BIOS",L"Timing",L"Controller",L"Display / Hiển thị",L"Giao diện"};
 constexpr unsigned category_count=sizeof(categories)/sizeof(categories[0]);
@@ -21,7 +24,44 @@ constexpr int reset_ui_id=1120,export_id=1121,import_id=1122;
 constexpr int mute_id=1200,pace_id=1201,bios_id=1202;
 constexpr int default_keys_id=1300,wasd_keys_id=1301,neutral_id=1302,key_base_id=1320;
 constexpr int stretch_screen_id=1400,fullscreen_id=1401;
+constexpr int cpu_profiler_id=1500,cpu_profile_interval_id=1501,cpu_trace_id=1502,cpu_trace_size_id=1503,cpu_trace_export_id=1504;
+constexpr int cpu_break_reserved_id=1510,cpu_break_exception_id=1511,cpu_pc_breakpoint_id=1512,cpu_pc_address_id=1513,cpu_pc_set_id=1514,cpu_pc_clear_id=1515;
+constexpr int cpu_diagnostics_id=1520,cpu_diagnostics_export_id=1521,cpu_defaults_id=1522;
+constexpr UINT_PTR cpu_stats_timer_id=1;
+constexpr unsigned cpu_profile_intervals[]={64,256,1024,4096,16384,65536};
+constexpr unsigned cpu_trace_sizes[]={128,512,2048,8192,16384};
 constexpr int width=960,height=700;
+
+template<std::size_t N> bool includes(const unsigned (&options)[N],unsigned value){
+	for(unsigned option:options)if(option==value)return true;
+	return false;
+}
+
+template<std::size_t N> unsigned selection_for(const unsigned (&options)[N],unsigned value){
+	for(unsigned i=0;i<N;i++)if(options[i]==value)return i;
+	return 0;
+}
+
+bool parse_pc_address(const std::wstring& text,uint32_t& address){
+	size_t first=0;if(text.size()>=2&&text[0]==L'0'&&(text[1]==L'x'||text[1]==L'X'))first=2;
+	if(first==text.size())return false;
+	uint64_t value=0;
+	for(size_t i=first;i<text.size();i++){
+		const wchar_t ch=text[i];unsigned digit=0;
+		if(ch>=L'0'&&ch<=L'9')digit=unsigned(ch-L'0');
+		else if(ch>=L'a'&&ch<=L'f')digit=unsigned(ch-L'a'+10);
+		else if(ch>=L'A'&&ch<=L'F')digit=unsigned(ch-L'A'+10);
+		else return false;
+		if(value>0x0fffffffu)return false;
+		value=(value<<4)|digit;
+	}
+	if(value&3)return false;
+	address=static_cast<uint32_t>(value);return true;
+}
+
+std::wstring format_pc_address(uint32_t address){
+	std::wostringstream text;text<<L"0x"<<std::hex<<std::uppercase<<std::setfill(L'0')<<std::setw(8)<<address;return text.str();
+}
 
 std::wstring win_error(const wchar_t* operation,DWORD code){
 	return std::wstring(operation)+L" failed (Windows error "+std::to_wstring(code)+L").";
@@ -46,6 +86,7 @@ bool read_unsigned(const std::filesystem::path& path,const wchar_t* section,cons
 	if(!read_text(path,section,key,text,present,error))return false;
 	if(!present){value=fallback;return true;}
 	if(text.empty()){error=std::wstring(L"Empty numeric setting: ")+section+L"/"+key;return false;}
+	if(!std::all_of(text.begin(),text.end(),[](wchar_t ch){return ch>=L'0'&&ch<=L'9';})){error=std::wstring(L"Invalid setting value: ")+section+L"/"+key;return false;}
 	wchar_t* end=nullptr;errno=0;const unsigned long parsed=std::wcstoul(text.c_str(),&end,10);
 	if(errno||end==text.c_str()||*end||parsed<minimum||parsed>maximum){error=std::wstring(L"Invalid setting value: ")+section+L"/"+key;return false;}
 	value=static_cast<unsigned>(parsed);
@@ -85,6 +126,7 @@ std::wstring key_name(unsigned key){
 
 struct WindowState {
 	HWND window=nullptr,owner=nullptr,categories_list=nullptr;
+	HWND cpu_statistics_control=nullptr;
 	Preferences* value=nullptr;
 	std::filesystem::path path;
 	SettingsActions actions;
@@ -115,7 +157,7 @@ void rebuild_fonts(WindowState& state){
 
 void clear_page(WindowState& state){
 	for(HWND control:state.page_controls)if(IsWindow(control))DestroyWindow(control);
-	state.page_controls.clear();state.listening_key=-1;
+	state.page_controls.clear();state.listening_key=-1;state.cpu_statistics_control=nullptr;
 }
 
 HWND add_control(WindowState& state,const wchar_t* class_name,const wchar_t* text,DWORD style,int id,int x,int y,int w,int h){
@@ -124,8 +166,12 @@ HWND add_control(WindowState& state,const wchar_t* class_name,const wchar_t* tex
 	return control;
 }
 
-void add_label(WindowState& state,const std::wstring& text,int y,int h=26){
-	add_control(state,L"STATIC",text.c_str(),SS_LEFT,0,238,y,680,h);
+HWND add_label_at(WindowState& state,const std::wstring& text,int x,int y,int w,int h=26){
+	return add_control(state,L"STATIC",text.c_str(),SS_LEFT,0,x,y,w,h);
+}
+
+HWND add_label(WindowState& state,const std::wstring& text,int y,int h=26){
+	return add_label_at(state,text,238,y,680,h);
 }
 
 HWND add_button(WindowState& state,const wchar_t* text,int id,int x,int y,int w=260){
@@ -138,12 +184,46 @@ HWND add_checkbox(WindowState& state,const wchar_t* text,int id,int y,bool check
 	return control;
 }
 
+HWND add_checkbox_at(WindowState& state,const wchar_t* text,int id,int x,int y,int w,bool checked){
+	HWND control=add_control(state,L"BUTTON",text,BS_AUTOCHECKBOX|WS_TABSTOP,id,x,y,w,28);
+	if(control)SendMessageW(control,BM_SETCHECK,checked?BST_CHECKED:BST_UNCHECKED,0);
+	return control;
+}
+
 HWND add_combo(WindowState& state,int id,int y,const std::vector<const wchar_t*>& options,unsigned selection){
 	HWND control=add_control(state,L"COMBOBOX",L"",CBS_DROPDOWNLIST|WS_VSCROLL|WS_TABSTOP,id,238,y,360,260);
 	if(!control)return nullptr;
 	for(const wchar_t* option:options)SendMessageW(control,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(option));
 	SendMessageW(control,CB_SETCURSEL,selection,0);
 	return control;
+}
+
+HWND add_combo_at(WindowState& state,int id,int x,int y,int w,const std::vector<const wchar_t*>& options,unsigned selection){
+	HWND control=add_control(state,L"COMBOBOX",L"",CBS_DROPDOWNLIST|WS_VSCROLL|WS_TABSTOP,id,x,y,w,260);
+	if(!control)return nullptr;
+	for(const wchar_t* option:options)SendMessageW(control,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(option));
+	SendMessageW(control,CB_SETCURSEL,selection,0);return control;
+}
+
+HWND add_edit(WindowState& state,const std::wstring& text,int id,int x,int y,int w){
+	return add_control(state,L"EDIT",text.c_str(),ES_AUTOHSCROLL|WS_BORDER|WS_TABSTOP,id,x,y,w,26);
+}
+
+std::wstring cpu_statistics_text(const Preferences& preferences,const SettingsSnapshot& snapshot){
+	std::wostringstream text;text<<L"Instructions: "<<snapshot.cpu_instructions<<L" | measured MIPS (Runner 1-s interval): ";
+	if(snapshot.cpu_mips_valid)text<<std::fixed<<std::setprecision(2)<<snapshot.cpu_mips;
+	else text<<L"n/a (Runner idle / warming up)";
+	text<<L"\r\nProfiler: "<<(preferences.cpu_profiler_enabled?L"Enabled":L"Disabled")<<L"; samples="<<snapshot.cpu_profile_samples<<L"; interval="<<preferences.cpu_profile_sample_interval
+		<<L"\r\nSampled host ns (fetch/trace/decode/execute): "<<snapshot.cpu_profile_fetch_ns<<L"/"<<snapshot.cpu_profile_trace_ns<<L"/"<<snapshot.cpu_profile_decode_ns<<L"/"<<snapshot.cpu_profile_execute_ns
+		<<L"\r\nTrace: "<<(preferences.cpu_trace_enabled?L"Enabled":L"Disabled")<<L" "<<snapshot.cpu_trace_records<<L"/"<<(snapshot.cpu_trace_capacity?snapshot.cpu_trace_capacity:preferences.cpu_trace_buffer_size)
+		<<L"; diagnostics: "<<(preferences.cpu_diagnostic_logging?L"Enabled":L"Disabled")<<L" "<<snapshot.cpu_diagnostic_events<<L"/64; times are host ns, not emulated cycles.";
+	return text.str();
+}
+
+void update_cpu_statistics(WindowState& state){
+	if(!state.cpu_statistics_control||!state.actions.snapshot||!state.value)return;
+	const auto snapshot=state.actions.snapshot();const auto text=cpu_statistics_text(*state.value,snapshot);
+	SetWindowTextW(state.cpu_statistics_control,text.c_str());
 }
 
 std::wstring region_name(unsigned region){
@@ -180,11 +260,44 @@ void build_page(WindowState& state){
 	if(!state.value)return;
 	const Preferences& p=*state.value;
 	switch(state.page){
-	case 0:
-		add_label(state,L"CPU execution mode: MIPS R3000A interpreter (only implemented mode).",82);
-		add_label(state,L"Dynarec/JIT, cache timing switches and CPU compatibility overrides are not supported.",116,42);
-		add_label(state,L"Device ticks remain in the CPU execution path; this page exposes no timing bypass.",166,42);
-		break;
+	case 0:{
+		add_label_at(state,L"Live CPU Performance Statistics",238,82,680);
+		state.cpu_statistics_control=add_label_at(state,L"",238,108,680,92);
+
+		add_label_at(state,L"Performance",238,204,320);
+		add_checkbox_at(state,L"Enable CPU profiler",cpu_profiler_id,238,230,320,p.cpu_profiler_enabled);
+		add_label_at(state,L"Measures host time; emulated cycles stay unchanged.",238,258,330,26);
+		add_label_at(state,L"Sample interval (instructions)",238,286,320,22);
+		add_combo_at(state,cpu_profile_interval_id,238,309,320,{L"64",L"256",L"1,024",L"4,096",L"16,384",L"65,536"},selection_for(cpu_profile_intervals,p.cpu_profile_sample_interval));
+
+		add_label_at(state,L"Instruction Trace",238,348,320);
+		add_checkbox_at(state,L"Enable instruction trace",cpu_trace_id,238,374,320,p.cpu_trace_enabled);
+		add_label_at(state,L"Separate from the 128-entry crash trace.",238,402,330,26);
+		add_label_at(state,L"Trace buffer size (records)",238,432,190,22);
+		add_combo_at(state,cpu_trace_size_id,238,455,190,{L"128",L"512",L"2,048",L"8,192",L"16,384"},selection_for(cpu_trace_sizes,p.cpu_trace_buffer_size));
+		add_button(state,L"Export trace...",cpu_trace_export_id,436,455,122);
+		add_label_at(state,L"Maximum 16,384 records; resized on apply.",238,490,330,26);
+		add_button(state,L"Restore CPU Defaults",cpu_defaults_id,238,532,190);
+
+		add_label_at(state,L"Debugging",574,204,354);
+		add_checkbox_at(state,L"Break on reserved instruction",cpu_break_reserved_id,574,230,354,p.cpu_break_on_reserved);
+		add_label_at(state,L"RI stop; Cause/EPC/Status stay intact.",574,258,370,26);
+		add_checkbox_at(state,L"Break on CPU exception",cpu_break_exception_id,574,288,370,p.cpu_break_on_exception);
+		add_label_at(state,L"Stops on CPU exceptions and interrupts.",574,316,370,26);
+		add_checkbox_at(state,L"Enable PC breakpoint",cpu_pc_breakpoint_id,574,346,370,p.cpu_pc_breakpoint_enabled);
+		add_label_at(state,L"Software stop; COP0 debug registers untouched.",574,374,370,26);
+		add_label_at(state,L"Address (hex; 32-bit, 4-byte aligned)",574,404,354,22);
+		add_edit(state,format_pc_address(p.cpu_pc_breakpoint_address),cpu_pc_address_id,574,428,164);
+		add_button(state,L"Set",cpu_pc_set_id,744,426,72);
+		add_button(state,L"Clear",cpu_pc_clear_id,820,426,92);
+
+		add_label_at(state,L"Diagnostics",574,464,354);
+		add_checkbox_at(state,L"Enable CPU diagnostic logging",cpu_diagnostics_id,574,490,354,p.cpu_diagnostic_logging);
+		add_label_at(state,L"64-event ring; exceptions/host errors only.",574,518,370,26);
+		add_button(state,L"Export CPU diagnostics...",cpu_diagnostics_export_id,574,558,190);
+		add_label_at(state,L"Not supported: JIT or CPU timing overrides.",238,604,680,26);
+		update_cpu_statistics(state);
+		break;}
 	case 1:
 		add_label(state,L"Renderer: deterministic software rasterizer; VRAM is 1024 x 512 pixels.",82);
 		add_label(state,L"Internal resolution and texture filtering overrides are not supported.",116);
@@ -271,6 +384,7 @@ LRESULT CALLBACK settings_proc(HWND window,UINT message,WPARAM wp,LPARAM lp){
 		state->categories_list=CreateWindowExW(0,L"LISTBOX",L"",WS_CHILD|WS_VISIBLE|WS_TABSTOP|LBS_NOTIFY|LBS_NOINTEGRALHEIGHT,20,68,190,560,window,reinterpret_cast<HMENU>(static_cast<INT_PTR>(category_id)),GetModuleHandleW(nullptr),nullptr);
 		if(!state->font||!state->title_font||!state->background||!state->panel||!state->categories_list)return -1;
 		SendMessageW(state->categories_list,WM_SETFONT,reinterpret_cast<WPARAM>(state->font),TRUE);for(unsigned n=0;n<category_count;n++)SendMessageW(state->categories_list,LB_ADDSTRING,0,reinterpret_cast<LPARAM>(categories[n]));SendMessageW(state->categories_list,LB_SETCURSEL,state->page,0);
+		if(!SetTimer(window,cpu_stats_timer_id,1000,nullptr))return -1;
 		build_page(*state);return 0;}
 	case WM_PAINT:{PAINTSTRUCT paint{};HDC dc=BeginPaint(window,&paint);RECT area{};GetClientRect(window,&area);FillRect(dc,&area,state->background);ps1ui::label(dc,L"Settings Center",RECT{22,20,430,54},state->title_font,ps1ui::text);ps1ui::label(dc,L"Hardware capabilities and persisted frontend preferences",RECT{438,24,928,50},state->font,ps1ui::muted,DT_RIGHT|DT_VCENTER|DT_SINGLELINE);ps1ui::box(dc,RECT{16,60,216,638},ps1ui::panel,ps1ui::border,8);ps1ui::box(dc,RECT{226,60,944,638},ps1ui::panel,ps1ui::border,8);EndPaint(window,&paint);return 0;}
 	case WM_ERASEBKGND:return 1;
@@ -283,10 +397,21 @@ LRESULT CALLBACK settings_proc(HWND window,UINT message,WPARAM wp,LPARAM lp){
 			if(id==theme_id)p.theme=static_cast<Theme>(selected);
 			else if(id==accent_id)p.accent=static_cast<unsigned>(selected);
 			else if(id==font_id)p.font_size=12+2*static_cast<unsigned>(selected);
+			else if(id==cpu_profile_interval_id){if(static_cast<size_t>(selected)>=std::size(cpu_profile_intervals))return 0;p.cpu_profile_sample_interval=cpu_profile_intervals[selected];}
+			else if(id==cpu_trace_size_id){if(static_cast<size_t>(selected)>=std::size(cpu_trace_sizes))return 0;p.cpu_trace_buffer_size=cpu_trace_sizes[selected];}
 			else return 0;
 			apply_changes(*state);return 0;
 		}
 		if(code!=BN_CLICKED)return 0;
+		if(id==cpu_trace_export_id){if(state->actions.export_cpu_trace)state->actions.export_cpu_trace();else show_message(*state,L"CPU trace export is unavailable.");return 0;}
+		if(id==cpu_diagnostics_export_id){if(state->actions.export_cpu_diagnostics)state->actions.export_cpu_diagnostics();else show_message(*state,L"CPU diagnostic export is unavailable.");return 0;}
+		if(id==cpu_pc_set_id){
+			wchar_t text[64]{};GetWindowTextW(GetDlgItem(window,cpu_pc_address_id),text,static_cast<int>(std::size(text)));uint32_t address=0;
+			if(!parse_pc_address(text,address)){show_message(*state,L"Enter a 32-bit hexadecimal PC address aligned to 4 bytes (for example 0x80010000).",L"Invalid CPU PC breakpoint");return 0;}
+			p.cpu_pc_breakpoint_address=address;p.cpu_pc_breakpoint_enabled=true;apply_changes(*state);return 0;
+		}
+		if(id==cpu_pc_clear_id){p.cpu_pc_breakpoint_enabled=false;p.cpu_pc_breakpoint_address=0;apply_changes(*state);return 0;}
+		if(id==cpu_defaults_id){restore_cpu_defaults(p);apply_changes(*state);return 0;}
 		if(id==toolbar_id)p.show_toolbar=SendMessageW(reinterpret_cast<HWND>(lp),BM_GETCHECK,0,0)==BST_CHECKED;
 		else if(id==status_id)p.show_status=SendMessageW(reinterpret_cast<HWND>(lp),BM_GETCHECK,0,0)==BST_CHECKED;
 		else if(id==fps_id)p.show_fps=SendMessageW(reinterpret_cast<HWND>(lp),BM_GETCHECK,0,0)==BST_CHECKED;
@@ -294,6 +419,12 @@ LRESULT CALLBACK settings_proc(HWND window,UINT message,WPARAM wp,LPARAM lp){
 		else if(id==debugger_id)p.show_debugger=SendMessageW(reinterpret_cast<HWND>(lp),BM_GETCHECK,0,0)==BST_CHECKED;
 		else if(id==stretch_screen_id)p.stretch_screen=SendMessageW(reinterpret_cast<HWND>(lp),BM_GETCHECK,0,0)==BST_CHECKED;
 		else if(id==fullscreen_id)p.fullscreen=SendMessageW(reinterpret_cast<HWND>(lp),BM_GETCHECK,0,0)==BST_CHECKED;
+		else if(id==cpu_profiler_id)p.cpu_profiler_enabled=SendMessageW(reinterpret_cast<HWND>(lp),BM_GETCHECK,0,0)==BST_CHECKED;
+		else if(id==cpu_trace_id)p.cpu_trace_enabled=SendMessageW(reinterpret_cast<HWND>(lp),BM_GETCHECK,0,0)==BST_CHECKED;
+		else if(id==cpu_break_reserved_id)p.cpu_break_on_reserved=SendMessageW(reinterpret_cast<HWND>(lp),BM_GETCHECK,0,0)==BST_CHECKED;
+		else if(id==cpu_break_exception_id)p.cpu_break_on_exception=SendMessageW(reinterpret_cast<HWND>(lp),BM_GETCHECK,0,0)==BST_CHECKED;
+		else if(id==cpu_pc_breakpoint_id)p.cpu_pc_breakpoint_enabled=SendMessageW(reinterpret_cast<HWND>(lp),BM_GETCHECK,0,0)==BST_CHECKED;
+		else if(id==cpu_diagnostics_id)p.cpu_diagnostic_logging=SendMessageW(reinterpret_cast<HWND>(lp),BM_GETCHECK,0,0)==BST_CHECKED;
 		else if(id==mute_id)p.muted=SendMessageW(reinterpret_cast<HWND>(lp),BM_GETCHECK,0,0)==BST_CHECKED;
 		else if(id==pace_id)p.limit_speed=SendMessageW(reinterpret_cast<HWND>(lp),BM_GETCHECK,0,0)==BST_CHECKED;
 		else if(id==bios_id){if(state->actions.choose_bios)state->actions.choose_bios();build_page(*state);return 0;}
@@ -316,11 +447,15 @@ LRESULT CALLBACK settings_proc(HWND window,UINT message,WPARAM wp,LPARAM lp){
 			state->value->keyboard_keys[target]=key;state->value->wasd_profile=false;state->listening_key=-1;apply_changes(*state);build_page(*state);return 0;
 		}
 		break;
+	case WM_TIMER:
+		if(wp==cpu_stats_timer_id&&state->page==0){update_cpu_statistics(*state);return 0;}
+		break;
 	case WM_GETMINMAXINFO:{auto* info=reinterpret_cast<MINMAXINFO*>(lp);info->ptMinTrackSize={900,650};return 0;}
 	case WM_CLOSE:DestroyWindow(window);return 0;
 	case WM_NCDESTROY:
 		if(current_window==window)current_window=nullptr;
 		if(pending_state==state)pending_state=nullptr;
+		KillTimer(window,cpu_stats_timer_id);
 		clear_page(*state);if(state->font)DeleteObject(state->font);if(state->title_font)DeleteObject(state->title_font);if(state->background)DeleteObject(state->background);if(state->panel)DeleteObject(state->panel);
 		SetWindowLongPtrW(window,GWLP_USERDATA,0);delete state;return DefWindowProcW(window,message,wp,lp);
 	}
@@ -342,6 +477,9 @@ bool validate_preferences(const Preferences& value,std::wstring& error){
 	if(value.accent>3){error=L"Accent color is outside the supported range.";return false;}
 	if(value.font_size<12||value.font_size>24||(value.font_size&1)){error=L"Font size must be an even value from 12 to 24.";return false;}
 	if(value.window_width<1040||value.window_width>8192||value.window_height<780||value.window_height>8192){error=L"Saved window dimensions are outside the supported range.";return false;}
+	if(!includes(cpu_profile_intervals,value.cpu_profile_sample_interval)){error=L"CPU profile sample interval is outside the supported choices.";return false;}
+	if(!includes(cpu_trace_sizes,value.cpu_trace_buffer_size)){error=L"CPU trace buffer size is outside the supported choices.";return false;}
+	if(value.cpu_pc_breakpoint_address&3){error=L"CPU PC breakpoint address must be 4-byte aligned.";return false;}
 	if(value.bios_path.find_first_of(L"\r\n")!=std::wstring::npos){error=L"BIOS path contains an invalid line break.";return false;}
 	for(unsigned i=0;i<value.keyboard_keys.size();i++){
 		const unsigned key=value.keyboard_keys[i];
@@ -349,6 +487,19 @@ bool validate_preferences(const Preferences& value,std::wstring& error){
 		if(key)for(unsigned j=0;j<i;j++)if(value.keyboard_keys[j]==key){error=L"Keyboard mapping contains duplicate keys.";return false;}
 	}
 	return true;
+}
+
+void restore_cpu_defaults(Preferences& value){
+	const Preferences defaults{};
+	value.cpu_profiler_enabled=defaults.cpu_profiler_enabled;
+	value.cpu_profile_sample_interval=defaults.cpu_profile_sample_interval;
+	value.cpu_trace_enabled=defaults.cpu_trace_enabled;
+	value.cpu_trace_buffer_size=defaults.cpu_trace_buffer_size;
+	value.cpu_break_on_reserved=defaults.cpu_break_on_reserved;
+	value.cpu_break_on_exception=defaults.cpu_break_on_exception;
+	value.cpu_pc_breakpoint_enabled=defaults.cpu_pc_breakpoint_enabled;
+	value.cpu_pc_breakpoint_address=defaults.cpu_pc_breakpoint_address;
+	value.cpu_diagnostic_logging=defaults.cpu_diagnostic_logging;
 }
 
 PreferenceLoadResult read_preferences(const std::filesystem::path& path,const std::filesystem::path& legacy_keyboard_path){
@@ -366,7 +517,7 @@ PreferenceLoadResult read_preferences(const std::filesystem::path& path,const st
 	if(version>current_schema){result.error=L"Settings schema is newer than this AVOPSEMU build.";return result;}
 	if(version<current_schema)result.migrated=true;
 	Preferences candidate{};
-	if(version==current_schema){
+	if(version>=1){
 		unsigned value=0;
 		if(!read_unsigned(source,L"UI",L"Theme",static_cast<unsigned>(candidate.theme),0,2,value,result.error))return result;candidate.theme=static_cast<Theme>(value);
 		if(!read_unsigned(source,L"UI",L"Accent",candidate.accent,0,3,candidate.accent,result.error)||
@@ -385,6 +536,19 @@ PreferenceLoadResult read_preferences(const std::filesystem::path& path,const st
 		   !read_boolean(source,L"Window",L"Fullscreen",candidate.fullscreen,candidate.fullscreen,result.error)||
 		   !read_keyboard(source,candidate,result.error))return result;
 		bool present=false;if(!read_text(source,L"Hardware",L"BiosPath",candidate.bios_path,present,result.error))return result;
+		if(version>=2){
+			unsigned breakpoint_address=0;
+			if(!read_boolean(source,L"CPU",L"ProfilerEnabled",candidate.cpu_profiler_enabled,candidate.cpu_profiler_enabled,result.error)||
+			   !read_unsigned(source,L"CPU",L"ProfileSampleInterval",candidate.cpu_profile_sample_interval,64,65536,candidate.cpu_profile_sample_interval,result.error)||
+			   !read_boolean(source,L"CPU",L"InstructionTraceEnabled",candidate.cpu_trace_enabled,candidate.cpu_trace_enabled,result.error)||
+			   !read_unsigned(source,L"CPU",L"TraceBufferSize",candidate.cpu_trace_buffer_size,128,16384,candidate.cpu_trace_buffer_size,result.error)||
+			   !read_boolean(source,L"CPU",L"BreakOnReservedInstruction",candidate.cpu_break_on_reserved,candidate.cpu_break_on_reserved,result.error)||
+			   !read_boolean(source,L"CPU",L"BreakOnException",candidate.cpu_break_on_exception,candidate.cpu_break_on_exception,result.error)||
+			   !read_boolean(source,L"CPU",L"PCBreakpointEnabled",candidate.cpu_pc_breakpoint_enabled,candidate.cpu_pc_breakpoint_enabled,result.error)||
+			   !read_unsigned(source,L"CPU",L"PCBreakpointAddress",0,0,0xffffffffu,breakpoint_address,result.error)||
+			   !read_boolean(source,L"CPU",L"DiagnosticLogging",candidate.cpu_diagnostic_logging,candidate.cpu_diagnostic_logging,result.error))return result;
+			candidate.cpu_pc_breakpoint_address=breakpoint_address;
+		}
 	}else if(!read_keyboard(source,candidate,result.error))return result;
 	std::wstring validation;if(!validate_preferences(candidate,validation)){result.error=validation;return result;}
 	result.value=std::move(candidate);return result;
@@ -403,6 +567,8 @@ bool write_preferences(const std::filesystem::path& path,const Preferences& valu
 	if(!put(L"Meta",L"SchemaVersion",number(current_schema))||
 	   !put(L"UI",L"Theme",number(static_cast<unsigned>(value.theme)))||!put(L"UI",L"Accent",number(value.accent))||!put(L"UI",L"FontSize",number(value.font_size))||
 	   !put(L"UI",L"ShowToolbar",boolean(value.show_toolbar))||!put(L"UI",L"ShowStatus",boolean(value.show_status))||!put(L"UI",L"ShowFps",boolean(value.show_fps))||!put(L"UI",L"ShowSidebar",boolean(value.show_sidebar))||!put(L"UI",L"ShowDebugger",boolean(value.show_debugger))||!put(L"UI",L"StretchScreen",boolean(value.stretch_screen))||
+	   !put(L"CPU",L"ProfilerEnabled",boolean(value.cpu_profiler_enabled))||!put(L"CPU",L"ProfileSampleInterval",number(value.cpu_profile_sample_interval))||!put(L"CPU",L"InstructionTraceEnabled",boolean(value.cpu_trace_enabled))||!put(L"CPU",L"TraceBufferSize",number(value.cpu_trace_buffer_size))||
+	   !put(L"CPU",L"BreakOnReservedInstruction",boolean(value.cpu_break_on_reserved))||!put(L"CPU",L"BreakOnException",boolean(value.cpu_break_on_exception))||!put(L"CPU",L"PCBreakpointEnabled",boolean(value.cpu_pc_breakpoint_enabled))||!put(L"CPU",L"PCBreakpointAddress",number(value.cpu_pc_breakpoint_address))||!put(L"CPU",L"DiagnosticLogging",boolean(value.cpu_diagnostic_logging))||
 	   !put(L"Hardware",L"LimitSpeed",boolean(value.limit_speed))||!put(L"Hardware",L"Muted",boolean(value.muted))||!put(L"Hardware",L"BiosPath",value.bios_path)||
 	   !put(L"Keyboard",L"Wasd",boolean(value.wasd_profile))||!put(L"Keyboard",L"NeutralOpposites",boolean(value.neutral_opposites))||
 	   !put(L"Window",L"Width",number(value.window_width))||!put(L"Window",L"Height",number(value.window_height))||!put(L"Window",L"Maximized",boolean(value.window_maximized))||!put(L"Window",L"Fullscreen",boolean(value.fullscreen)))return false;

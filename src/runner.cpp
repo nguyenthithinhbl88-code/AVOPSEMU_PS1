@@ -15,17 +15,24 @@ struct ElapsedCounter {
 }
 void Runner::stop(){quit=true;wake.notify_all();if(worker.joinable())worker.join();alive=false;}
 void Runner::start(bool paced){
- stop();{std::lock_guard<std::mutex> lock(machine);failure.clear();}
+ stop();{std::lock_guard<std::mutex> lock(machine);failure.clear();cpu.resume_from_debug_break();}debugger_paused=false;
  core_time_ns.store(0,std::memory_order_relaxed);machine_lock_wait_ns.store(0,std::memory_order_relaxed);
  quit=false;alive=true;
  try{worker=std::thread([this,paced]{
   using Clock=std::chrono::steady_clock;const auto start=Clock::now();uint64_t clocks=0;
   try{
-   while(!quit){
+    while(!quit){
+      bool debug_break_hit=false;
      {const auto wait_start=Clock::now();std::unique_lock<std::mutex> lock(machine);const auto acquired=Clock::now();
       machine_lock_wait_ns.fetch_add(uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(acquired-wait_start).count()),std::memory_order_relaxed);
       ElapsedCounter core_timer(core_time_ns,acquired);
-      for(unsigned i=0;i<2048&&!quit;i++){cpu.step();clocks++;if(cpu.bios_system_error)throw std::runtime_error(cpu.failure_summary());}}
+       for(unsigned i=0;i<2048&&!quit;i++){
+        cpu.step();
+        if(cpu.bios_system_error)throw std::runtime_error(cpu.failure_summary());
+        if(cpu.debug_break_pending){failure=cpu.debug_break_description();debugger_paused=true;debug_break_hit=true;break;}
+        clocks++;
+       }}
+      if(debug_break_hit)break;
     std::this_thread::yield(); // allow UI/audio consumers to acquire the shared machine mutex
     if(paced){const auto target=start+std::chrono::nanoseconds(int64_t(double(clocks)*1e9/33868800.0));
      if(target-Clock::now()>std::chrono::milliseconds(2)){std::unique_lock<std::mutex> lock(wait_mutex);wake.wait_until(lock,target,[this]{return quit.load();});}
@@ -35,12 +42,12 @@ void Runner::start(bool paced){
 #ifdef _WIN32
     win_diag::write_event("Runner",e.what(),true);
 #endif
-    std::lock_guard<std::mutex> lock(machine);failure=e.what();
+     std::lock_guard<std::mutex> lock(machine);cpu.record_diagnostic_error(e.what());failure=e.what();
    }catch(...){
 #ifdef _WIN32
     win_diag::write_event("Runner","Non-standard exception in CPU worker",true);
 #endif
-    std::lock_guard<std::mutex> lock(machine);failure="Non-standard exception in CPU worker";
+     std::lock_guard<std::mutex> lock(machine);cpu.record_diagnostic_error("Non-standard exception in CPU worker");failure="Non-standard exception in CPU worker";
    }
   alive=false;
   });}catch(const std::exception& e){

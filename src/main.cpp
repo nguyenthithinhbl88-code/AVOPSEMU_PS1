@@ -22,7 +22,7 @@ int main(int argc,char** argv){
    ps1::install_demo(bus);cpu.reset(0);for(int i=0;i<4;i++)cpu.step();std::cout<<"MIPS demo: 7 + 5 = "<<bus.read32(256)<<"\n";return 0;
   }
    std::string bios,exe,disc,wav,capture;
-   uint64_t steps=1000000,capture_interval=0;
+	   uint64_t steps=1000000,capture_interval=0;unsigned cpu_profile_interval=0;
   for(int i=1;i<argc;i++){
    const std::string arg=argv[i];if(i+1>=argc)throw std::runtime_error("Missing option value");
    const std::string value=argv[++i];
@@ -32,6 +32,7 @@ int main(int argc,char** argv){
 	else if(arg=="--wav")wav=value;
 	else if(arg=="--capture")capture=value;
 	else if(arg=="--capture-every-instructions"){size_t used=0;capture_interval=std::stoull(value,&used);if(used!=value.size()||!capture_interval)throw std::runtime_error("Capture interval must be greater than zero");}
+	else if(arg=="--cpu-profile-interval"){size_t used=0;const auto interval=std::stoull(value,&used);if(used!=value.size()||interval<ps1::Cpu::minimum_profile_sample_interval||interval>ps1::Cpu::maximum_profile_sample_interval)throw std::runtime_error("CPU profile interval must be from 64 to 65536 instructions");cpu_profile_interval=static_cast<unsigned>(interval);}
 	else if(arg=="--steps"){size_t used=0;steps=std::stoull(value,&used);if(used!=value.size()||steps>1000000000)throw std::runtime_error("Step limit is 1000000000");}
    else throw std::runtime_error("Unknown CLI option");
   }
@@ -43,6 +44,10 @@ int main(int argc,char** argv){
    file.seekg(0);std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(file)),{});ps1::load_exe(bus,cpu,bytes);
   }
   bus.sio[0].connected=true;
+	if(cpu_profile_interval){
+	 ps1::CpuDebugOptions profile;profile.profiler_enabled=true;profile.profile_sample_interval=cpu_profile_interval;std::string error;
+	 if(!cpu.configure_debug(profile,error))throw std::runtime_error("CPU profile configuration failed: "+error);
+	}
 	if(capture_interval&&capture.empty())throw std::runtime_error("--capture-every-instructions requires --capture");
   std::unique_ptr<ps1::WaveWriter> writer;if(!wav.empty())writer=std::make_unique<ps1::WaveWriter>(wav);
 	auto save_capture=[&](const std::string& prefix){

@@ -7,6 +7,8 @@
 #include "timers.hpp"
 #include "cdrom.hpp"
 #include "sio.hpp"
+#include "cpu_profile_simple.hpp"
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -29,7 +31,7 @@ struct Bus {
     uint16_t previous_irq_lines=0;
     uint64_t irq0_latch_requests=0,irq0_latch_edges=0,irq0_ack_writes=0,irq0_ack_clears=0;
     void sample_irq_lines();
-    void tick_timers();
+    void tick_timers(CpuProfileCounters* profile=nullptr);
     std::array<uint32_t,9> memory_control{};
     uint32_t ram_control=0,cache_control=0;
     uint16_t irq_status=0,irq_mask=0;
@@ -62,7 +64,23 @@ struct Bus {
     void write32(uint32_t a,uint32_t v);
     void load_bios(const std::string& path);
 };
+struct CpuDebugOptions {
+    bool profiler_enabled=false;
+    unsigned profile_sample_interval=4096;
+    bool instruction_trace_enabled=false;
+    unsigned trace_buffer_size=128;
+    bool break_on_reserved_instruction=false;
+    bool break_on_cpu_exception=false;
+    bool pc_breakpoint_enabled=false;
+    uint32_t pc_breakpoint_address=0;
+    bool diagnostic_logging=false;
+};
+enum class CpuDebugBreakReason : uint8_t {None,ProgramCounter,ReservedInstruction,CpuException};
 struct Cpu {
+    static constexpr unsigned minimum_profile_sample_interval=64;
+    static constexpr unsigned maximum_profile_sample_interval=65536;
+    static constexpr unsigned minimum_trace_buffer_size=128;
+    static constexpr unsigned maximum_trace_buffer_size=16384;
     Bus& bus;
     std::array<uint32_t,32> r{};
     uint32_t pc=0xbfc00000, next_pc=0xbfc00004;
@@ -77,6 +95,25 @@ struct Cpu {
     std::array<uint32_t,4> last_bios_args{};
     struct Trace {uint32_t pc=0,opcode=0,rs_value=0,rt_value=0,load_reg=0,load_value=0;};
     std::array<Trace,128> trace{};
+    enum class DiagnosticKind : uint8_t {Exception,HostError};
+    struct DiagnosticEvent {
+        DiagnosticKind kind=DiagnosticKind::Exception;
+        uint64_t instruction=0;
+        uint32_t pc=0,opcode=0,status=0,cause=0,epc=0;
+        uint8_t code=0;
+        bool has_opcode=false,in_delay=false;
+        char message[128]{};
+    };
+    CpuDebugOptions debug_options{};
+    bool debugger_tools_active=false,pc_breakpoint_active=false,profiling_active=false,instruction_trace_active=false;
+    CpuDebugBreakReason debug_break_reason=CpuDebugBreakReason::None;
+    bool debug_break_pending=false,skip_pc_break_once=false;
+    uint32_t debug_break_pc=0,debug_break_opcode=0,debug_break_code=0;
+    CpuProfileCounters profile_counters{};
+    std::vector<Trace> instruction_trace_buffer;
+    uint64_t instruction_trace_total=0;
+    std::array<DiagnosticEvent,64> diagnostic_history{};
+    uint64_t diagnostic_total=0;
     struct FaultSnapshot {
         bool valid=false,has_opcode=false,in_delay=false;
         uint32_t code=0,pc=0,opcode=0,status=0,cause=0,epc=0;
@@ -90,6 +127,15 @@ struct Cpu {
     unsigned pending_reg=0;
     uint32_t pending_value=0;
     explicit Cpu(Bus& b):bus(b){}
+    bool configure_debug(const CpuDebugOptions& options,std::string& error);
+    const CpuDebugOptions& debug_configuration()const noexcept{return debug_options;}
+    std::size_t instruction_trace_records()const noexcept;
+    std::size_t diagnostic_event_records()const noexcept;
+    std::string instruction_trace_export_text()const;
+    std::string diagnostic_log_text()const;
+    std::string debug_break_description()const;
+    void resume_from_debug_break()noexcept;
+    void record_diagnostic_error(const char* message)noexcept;
     void reset(uint32_t entry=0xbfc00000);
     void step();
 };

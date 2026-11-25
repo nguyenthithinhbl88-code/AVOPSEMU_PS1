@@ -6,9 +6,7 @@
 #include <sstream>
 #include <iomanip>
 #include <cstring>
-#ifdef AVOPSEMU_ENABLE_CPU_PROFILE
-#include "cpu_profile_simple.hpp"
-#endif
+#include <chrono>
 namespace ps1 {
 static std::runtime_error bus_error(const char* operation,uint32_t a){std::ostringstream s;s<<operation<<" @ 0x"<<std::hex<<std::setw(8)<<std::setfill('0')<<a;return std::runtime_error(s.str());}
 static uint32_t physical(uint32_t a) { return a & 0x1fffffff; }
@@ -29,31 +27,81 @@ void Bus::sample_irq_lines(){
  for(unsigned i=0;i<2;i++)if(sio[i].irq)lines|=uint16_t(1u<<(7+i));
  irq_status|=uint16_t(lines&~previous_irq_lines);previous_irq_lines=lines;
 }
-void Bus::tick_timers(){
+void Bus::tick_timers(CpuProfileCounters* profile){
+#ifndef AVOPSEMU_ENABLE_CPU_PROFILE
+ (void)profile;
+#endif
  cd.clocks++;
- for(auto& port:sio)if(port.tx_busy|bool(port.ack_delay)|bool(port.ack_width)|bool(port.irq_reassert)){port.context_pc=writer_cpu?writer_pc:0;port.tick(cd.clocks);}
- if(dma[2].chop_wait|dma[3].chop_wait|dma[4].chop_wait){
-  if(dma[2].chop_wait)dma[2].chop_wait--;
-  if(dma[3].chop_wait)dma[3].chop_wait--;
-  if(dma[4].chop_wait)dma[4].chop_wait--;
+ {
+#ifdef AVOPSEMU_ENABLE_CPU_PROFILE
+  CpuProfileSubsystemTimer timer(profile,profile?&profile->sio_tick_ns:nullptr);
+#endif
+  for(auto& port:sio)if(port.tx_busy|bool(port.ack_delay)|bool(port.ack_width)|bool(port.irq_reassert)){port.context_pc=writer_cpu?writer_pc:0;port.tick(cd.clocks);}
+ }
+ {
+#ifdef AVOPSEMU_ENABLE_CPU_PROFILE
+  CpuProfileSubsystemTimer timer(profile,profile?&profile->dma_tick_ns:nullptr);
+#endif
+  if(dma[2].chop_wait|dma[3].chop_wait|dma[4].chop_wait){
+   if(dma[2].chop_wait)dma[2].chop_wait--;
+   if(dma[3].chop_wait)dma[3].chop_wait--;
+   if(dma[4].chop_wait)dma[4].chop_wait--;
+  }
  }
  const unsigned sources=((timers[0].mode&0x100)?1:0)|(((timers[0].mode&1)||(timers[1].mode&0x100))?2:0);
- const bool vblank=gpu.tick_video(sources);if(vblank){irq0_latch_requests++;if(!(irq_status&1))irq0_latch_edges++;irq_status|=1;}
- sample_irq_lines();bool resample=false;
+ bool vblank=false;
+ {
+#ifdef AVOPSEMU_ENABLE_CPU_PROFILE
+  CpuProfileSubsystemTimer timer(profile,profile?&profile->gpu_video_ns:nullptr);
+#endif
+  vblank=gpu.tick_video(sources);
+ }
+ if(vblank){irq0_latch_requests++;if(!(irq_status&1))irq0_latch_edges++;irq_status|=1;}
+ bool resample=false;
+ {
+#ifdef AVOPSEMU_ENABLE_CPU_PROFILE
+  CpuProfileSubsystemTimer timer(profile,profile?&profile->irq_sample_ns:nullptr);
+#endif
+  sample_irq_lines();
+ }
  const bool cd_active=bool(cd.audio_start_delay)|bool(cd.irq_delay)|bool(cd.response_delay)|cd.busy|cd.reading|!cd.events.empty()|!cd.pending.empty();
- if(cd_active){cd.tick();resample=true;}
+ if(cd_active){
+#ifdef AVOPSEMU_ENABLE_CPU_PROFILE
+  CpuProfileSubsystemTimer timer(profile,profile?&profile->cdrom_tick_ns:nullptr);
+#endif
+  cd.tick();resample=true;
+ }
  const bool dma_active=bool(dma[3].control&(1u<<24))|bool(dma[0].control&(1u<<24))|bool(dma[1].control&(1u<<24))|((dma[2].control&0x1000100u)==0x1000100u)|((dma[4].control&0x1000100u)==0x1000100u);
  if(dma_active){
+#ifdef AVOPSEMU_ENABLE_CPU_PROFILE
+  CpuProfileSubsystemTimer timer(profile,profile?&profile->dma_tick_ns:nullptr);
+#endif
   if(dma[3].control&(1u<<24)){run_dma(3);resample=true;}
   if(dma[0].control&(1u<<24)){run_dma(0);resample=true;}
   if(dma[1].control&(1u<<24)){run_dma(1);resample=true;}
   if((dma[2].control&0x1000100u)==0x1000100u){run_dma(2);resample=true;}
   if((dma[4].control&0x1000100u)==0x1000100u){run_dma(4);resample=true;}
  }
- if(++spu.sample_clock==768){spu.sample_clock=0;const auto pcm=cd.audio_sample();spu.render_sample(pcm[0],pcm[1]);resample=true;}if(resample)sample_irq_lines();
- if(timers[0].tick(0,gpu.timer_dots,gpu.video_hblank,gpu.timer_hblank_rise))irq_status|=1u<<4;
- if(timers[1].tick(1,gpu.timer_hblank_rise?1:0,gpu.video_vblank,vblank))irq_status|=1u<<5;
- if(timers[2].tick(2))irq_status|=1u<<6;
+ if(++spu.sample_clock==768){
+#ifdef AVOPSEMU_ENABLE_CPU_PROFILE
+  CpuProfileSubsystemTimer timer(profile,profile?&profile->spu_tick_ns:nullptr);
+#endif
+  spu.sample_clock=0;const auto pcm=cd.audio_sample();spu.render_sample(pcm[0],pcm[1]);resample=true;
+ }
+ if(resample){
+#ifdef AVOPSEMU_ENABLE_CPU_PROFILE
+  CpuProfileSubsystemTimer timer(profile,profile?&profile->irq_sample_ns:nullptr);
+#endif
+  sample_irq_lines();
+ }
+ {
+#ifdef AVOPSEMU_ENABLE_CPU_PROFILE
+  CpuProfileSubsystemTimer timer(profile,profile?&profile->timer_tick_ns:nullptr);
+#endif
+  if(timers[0].tick(0,gpu.timer_dots,gpu.video_hblank,gpu.timer_hblank_rise))irq_status|=1u<<4;
+  if(timers[1].tick(1,gpu.timer_hblank_rise?1:0,gpu.video_vblank,vblank))irq_status|=1u<<5;
+  if(timers[2].tick(2))irq_status|=1u<<6;
+ }
 }
 
 uint8_t Bus::read8(uint32_t a) const {
@@ -170,19 +218,117 @@ void Cpu::reset(uint32_t entry) {
     gte=Gte{};first_fault=FaultSnapshot{};bios_system_error=false;
     bios_calls=0;last_bios_vector=last_bios_function=last_bios_return=0;last_bios_args.fill(0);
     instructions=interrupts=irq0_exceptions=reserved_exceptions=0;last_reserved_pc=last_reserved_opcode=0;trace.fill({});r.fill(0);cop0.fill(0);cop0[12]=0x00400000;cop0[15]=2;
+    std::fill(instruction_trace_buffer.begin(),instruction_trace_buffer.end(),Trace{});instruction_trace_total=0;diagnostic_history.fill({});diagnostic_total=0;profile_counters=CpuProfileCounters{};
+    if(profiling_active)profile_counters.clock_pair_overhead_ns=cpu_profile_clock_pair_overhead_ns();
+    debug_break_pending=false;debug_break_reason=CpuDebugBreakReason::None;skip_pc_break_once=false;debug_break_pc=debug_break_opcode=debug_break_code=0;
     hi=lo=0;pc=entry;next_pc=entry+4;pending_reg=0;pending_value=0;delay_slot=false;branch_taken=false;
+}
+bool Cpu::configure_debug(const CpuDebugOptions& options,std::string& error){
+    error.clear();
+    if(options.profile_sample_interval<minimum_profile_sample_interval||options.profile_sample_interval>maximum_profile_sample_interval){error="CPU profile sample interval must be from 64 to 65536 instructions";return false;}
+    if(options.trace_buffer_size<minimum_trace_buffer_size||options.trace_buffer_size>maximum_trace_buffer_size||(options.trace_buffer_size&(options.trace_buffer_size-1))){error="CPU trace buffer size must be a power of two from 128 to 16384 records";return false;}
+    if(options.pc_breakpoint_enabled&&(options.pc_breakpoint_address&3)){error="CPU PC breakpoint address must be 4-byte aligned";return false;}
+    if(instruction_trace_buffer.size()!=options.trace_buffer_size){
+        std::vector<Trace> resized(options.trace_buffer_size);
+        const auto retained=instruction_trace_records();
+        const auto first=instruction_trace_total-retained;
+        for(std::size_t i=0;i<retained;i++)resized[i]=instruction_trace_buffer[(first+i)%instruction_trace_buffer.size()];
+        instruction_trace_buffer.swap(resized);instruction_trace_total=retained;
+    }
+    const bool profile_changed=debug_options.profiler_enabled!=options.profiler_enabled||debug_options.profile_sample_interval!=options.profile_sample_interval;
+    const bool pc_breakpoint_changed=debug_options.pc_breakpoint_enabled!=options.pc_breakpoint_enabled||debug_options.pc_breakpoint_address!=options.pc_breakpoint_address;
+    debug_options=options;
+    profiling_active=options.profiler_enabled;instruction_trace_active=options.instruction_trace_enabled;pc_breakpoint_active=options.pc_breakpoint_enabled;
+    debugger_tools_active=options.break_on_reserved_instruction||options.break_on_cpu_exception||options.pc_breakpoint_enabled;
+    if(pc_breakpoint_changed)skip_pc_break_once=false;
+    if(!debugger_tools_active){debug_break_pending=false;debug_break_reason=CpuDebugBreakReason::None;skip_pc_break_once=false;}
+    if(profile_changed&&options.profiler_enabled){profile_counters=CpuProfileCounters{};profile_counters.clock_pair_overhead_ns=cpu_profile_clock_pair_overhead_ns();}
+    return true;
+}
+std::size_t Cpu::instruction_trace_records()const noexcept{
+    return static_cast<std::size_t>(std::min<uint64_t>(instruction_trace_total,instruction_trace_buffer.size()));
+}
+std::size_t Cpu::diagnostic_event_records()const noexcept{
+    return static_cast<std::size_t>(std::min<uint64_t>(diagnostic_total,diagnostic_history.size()));
+}
+std::string Cpu::instruction_trace_export_text()const{
+    std::ostringstream out;const auto count=instruction_trace_records();
+    out<<"AVOPSEMU CPU instruction trace\nRecords retained: "<<count<<" / "<<instruction_trace_buffer.size()<<"\n";
+    if(!count)out<<"No instruction records were captured.\n";
+    out<<std::hex<<std::setfill('0');const uint64_t first=instruction_trace_total-count;
+    for(uint64_t i=first;i<instruction_trace_total;i++){
+        const auto& item=instruction_trace_buffer[i%instruction_trace_buffer.size()];
+        out<<std::setw(8)<<item.pc<<": "<<std::setw(8)<<item.opcode<<" rs="<<std::setw(8)<<item.rs_value<<" rt="<<std::setw(8)<<item.rt_value<<" pending=r"<<std::dec<<item.load_reg<<":"<<std::hex<<std::setw(8)<<item.load_value<<"\n";
+    }
+    return out.str();
+}
+std::string Cpu::diagnostic_log_text()const{
+    std::ostringstream out;const auto count=diagnostic_event_records();
+    out<<"AVOPSEMU CPU diagnostics (exception and host-error events only)\n"
+       <<"Logging: "<<(debug_options.diagnostic_logging?"Enabled":"Disabled")<<"; retained: "<<count<<" / "<<diagnostic_history.size()<<"\n"
+       <<"Current instruction count: "<<instructions<<" PC=0x"<<std::hex<<std::setfill('0')<<std::setw(8)<<pc
+       <<" Status=0x"<<std::setw(8)<<cop0[12]<<" Cause=0x"<<std::setw(8)<<cop0[13]<<" EPC=0x"<<std::setw(8)<<cop0[14]<<"\n";
+    const uint64_t first=diagnostic_total-count;
+    for(uint64_t i=first;i<diagnostic_total;i++){
+        const auto& item=diagnostic_history[i%diagnostic_history.size()];
+        if(item.kind==DiagnosticKind::HostError){
+            out<<"ERROR instruction="<<std::dec<<item.instruction<<" PC=0x"<<std::hex<<std::setw(8)<<item.pc;
+            if(item.has_opcode)out<<" opcode=0x"<<std::setw(8)<<item.opcode;
+            out<<" Status=0x"<<std::setw(8)<<item.status<<" Cause=0x"<<std::setw(8)<<item.cause<<" EPC=0x"<<std::setw(8)<<item.epc<<" message=\""<<item.message<<"\"\n";
+        }else{
+            out<<"EXCEPTION instruction="<<std::dec<<item.instruction<<" code="<<unsigned(item.code)<<" PC=0x"<<std::hex<<std::setw(8)<<item.pc;
+            if(item.has_opcode)out<<" opcode=0x"<<std::setw(8)<<item.opcode;
+            out<<" StatusBefore=0x"<<std::setw(8)<<item.status<<" Cause=0x"<<std::setw(8)<<item.cause<<" EPC=0x"<<std::setw(8)<<item.epc<<" delay="<<std::dec<<item.in_delay<<"\n";
+        }
+    }
+    return out.str();
+}
+std::string Cpu::debug_break_description()const{
+    const char* reason="none";
+    switch(debug_break_reason){case CpuDebugBreakReason::ProgramCounter:reason="PC breakpoint";break;case CpuDebugBreakReason::ReservedInstruction:reason="reserved instruction";break;case CpuDebugBreakReason::CpuException:reason="CPU exception";break;case CpuDebugBreakReason::None:break;}
+    std::ostringstream out;out<<"CPU debugger break: "<<reason<<" at PC=0x"<<std::hex<<std::setfill('0')<<std::setw(8)<<debug_break_pc;
+    if(debug_break_reason!=CpuDebugBreakReason::ProgramCounter)out<<" opcode=0x"<<std::setw(8)<<debug_break_opcode<<" exception="<<std::dec<<debug_break_code;
+    return out.str();
+}
+void Cpu::resume_from_debug_break()noexcept{
+    if(debug_break_pending&&debug_break_reason==CpuDebugBreakReason::ProgramCounter)skip_pc_break_once=true;
+    debug_break_pending=false;debug_break_reason=CpuDebugBreakReason::None;
+}
+void Cpu::record_diagnostic_error(const char* message)noexcept{
+    if(!debug_options.diagnostic_logging)return;
+    auto& item=diagnostic_history[diagnostic_total++%diagnostic_history.size()];item=DiagnosticEvent{};item.kind=DiagnosticKind::HostError;item.instruction=instructions;
+    const auto context=current_cpu_crash_context();item.pc=context.valid?context.pc:pc;item.opcode=context.valid?context.opcode:0;item.has_opcode=context.valid;
+    item.status=cop0[12];item.cause=cop0[13];item.epc=cop0[14];if(message){std::strncpy(item.message,message,sizeof(item.message)-1);item.message[sizeof(item.message)-1]='\0';}
 }
 void Cpu::step() {
     struct WriterScope {Bus& b;~WriterScope(){b.writer_cpu=false;}} writer_scope{bus};
     bus.writer_cpu=false;
-#ifdef AVOPSEMU_ENABLE_CPU_PROFILE
-    const bool profile_sample=(instructions&4095u)==0;
-    if(profile_sample)cpu_profile.sampled_steps++;
-#endif
     const uint32_t ip=pc;
+    uint32_t fetched_opcode=0;bool has_opcode=false;
+    auto request_debug_break=[&](CpuDebugBreakReason reason,unsigned code){debug_break_pending=true;debug_break_reason=reason;debug_break_pc=ip;debug_break_opcode=has_opcode?fetched_opcode:0;debug_break_code=code;};
+    if(debugger_tools_active){
+        if(debug_break_pending)return;
+        if(pc_breakpoint_active&&ip==debug_options.pc_breakpoint_address){
+            if(skip_pc_break_once)skip_pc_break_once=false;
+            else{request_debug_break(CpuDebugBreakReason::ProgramCounter,0);return;}
+        }
+    }
+    const bool profile_sample=profiling_active&&debug_options.profile_sample_interval&&(instructions%debug_options.profile_sample_interval==0);
+    CpuProfileStepTimer sampled_step(profile_sample?&profile_counters:nullptr);
+    if(profile_sample)profile_counters.sampled_steps++;
+    auto tick_devices=[&](){
+        if(!profile_sample){bus.tick_timers();return;}
+        profile_counters.device_tick_calls++;
+        const auto start=CpuProfileClock::now();
+#ifdef AVOPSEMU_ENABLE_CPU_PROFILE
+        bus.tick_timers(&profile_counters);
+#else
+        bus.tick_timers();
+#endif
+        profile_counters.device_tick_ns+=cpu_profile_elapsed_ns(start,profile_counters.clock_pair_overhead_ns);
+    };
     const bool in_delay=delay_slot,taken_delay=delay_slot&&branch_taken;
     const uint32_t delay_target=next_pc;
-    uint32_t fetched_opcode=0;bool has_opcode=false;
     auto exception=[&](unsigned code,unsigned coprocessor=0,bool debug=false) {
         const uint32_t previous_status=cop0[12];
         if(code==10){reserved_exceptions++;last_reserved_pc=ip;last_reserved_opcode=fetched_opcode;}
@@ -196,19 +342,24 @@ void Cpu::step() {
             first_fault.registers=r;first_fault.trace=trace;first_fault.gte_data=gte.data;first_fault.gte_control=gte.control;
         }
         pc=(cop0[12]&0x400000)?(debug?0xbfc00140u:0xbfc00180u):(debug?0x80000040u:0x80000080u);next_pc=pc+4;delay_slot=false;branch_taken=false;
+        if(debug_options.diagnostic_logging){
+            auto& item=diagnostic_history[diagnostic_total++%diagnostic_history.size()];item=DiagnosticEvent{};item.kind=DiagnosticKind::Exception;item.instruction=instructions;item.pc=ip;item.opcode=fetched_opcode;item.has_opcode=has_opcode;item.status=previous_status;item.cause=cop0[13];item.epc=cop0[14];item.code=uint8_t(code);item.in_delay=in_delay;
+        }
+        if(code==10&&debug_options.break_on_reserved_instruction)request_debug_break(CpuDebugBreakReason::ReservedInstruction,code);
+        else if(debug_options.break_on_cpu_exception)request_debug_break(CpuDebugBreakReason::CpuException,code);
     };
     cop0[13]=(cop0[13]&~0x400u)|((bus.irq_status&bus.irq_mask)?0x400u:0);
     if((cop0[12]&1)&&(cop0[12]&cop0[13]&0xff00)){
         if(pending_reg)r[pending_reg]=pending_value;
         const bool irq0=(bus.irq_status&bus.irq_mask&1)!=0;
-        pending_reg=0;exception(0);bus.tick_timers();interrupts++;if(irq0)irq0_exceptions++;return;
+        pending_reg=0;exception(0);tick_devices();interrupts++;if(irq0)irq0_exceptions++;return;
     }
-    if((ip&3)||((cop0[12]&2)&&(ip&0x80000000u))){ if(pending_reg)r[pending_reg]=pending_value;pending_reg=0;cop0[8]=ip;exception(4);bus.tick_timers();return; }
+    if((ip&3)||((cop0[12]&2)&&(ip&0x80000000u))){ if(pending_reg)r[pending_reg]=pending_value;pending_reg=0;cop0[8]=ip;exception(4);tick_devices();return; }
     const uint32_t dcic=cop0[7];
     const uint32_t debug_mode=(cop0[12]&2)?0x40000000u:0x20000000u;
     if((dcic&0x01800000u)==0x01800000u&&(dcic&debug_mode)&&!((ip^cop0[3])&cop0[11])){
         cop0[7]|=3;
-        if(dcic&0x80000000u){if(pending_reg)r[pending_reg]=pending_value;pending_reg=0;exception(9,0,true);bus.tick_timers();return;}
+        if(dcic&0x80000000u){if(pending_reg)r[pending_reg]=pending_value;pending_reg=0;exception(9,0,true);tick_devices();return;}
     }
     const uint32_t vector=physical(ip);
     if(vector>=0xa0&&vector<=0xc0&&(vector&15)==0){
@@ -223,30 +374,23 @@ void Cpu::step() {
     // Fetch RAM/BIOS directly after the architectural alignment/IRQ checks.
     // Other address regions retain the bus decoder and its explicit faults.
     auto word=[](const uint8_t* data){return uint32_t(data[0])|(uint32_t(data[1])<<8)|(uint32_t(data[2])<<16)|(uint32_t(data[3])<<24);};
-#ifdef AVOPSEMU_ENABLE_CPU_PROFILE
     const auto fetch_start=profile_sample?CpuProfileClock::now():CpuProfileClock::time_point{};
-#endif
     const uint32_t ins=vector<0x800000?load_le32(bus.ram.data()+(vector&0x1fffff)):
         vector>=0x1fc00000&&vector<0x1fc80000?load_le32(bus.bios.data()+vector-0x1fc00000):bus.read32(ip);
-#ifdef AVOPSEMU_ENABLE_CPU_PROFILE
-    if(profile_sample)cpu_profile.fetch_ns+=uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(CpuProfileClock::now()-fetch_start).count());
+    if(profile_sample){profile_counters.phase_timer_pairs++;profile_counters.fetch_ns+=cpu_profile_elapsed_ns(fetch_start,profile_counters.clock_pair_overhead_ns);}
     const auto trace_start=profile_sample?CpuProfileClock::now():CpuProfileClock::time_point{};
-#endif
     fetched_opcode=ins;has_opcode=true;record_cpu_crash_context(ip,ins);bus.writer_pc=ip;bus.writer_opcode=ins;bus.writer_instruction=instructions;bus.writer_cpu=true;
-    trace[instructions%trace.size()]={ip,ins,r[(ins>>21)&31],r[(ins>>16)&31],pending_reg,pending_value};instructions++;
+    const Trace trace_entry{ip,ins,r[(ins>>21)&31],r[(ins>>16)&31],pending_reg,pending_value};
+    trace[instructions%trace.size()]=trace_entry;
+    if(instruction_trace_active&&!instruction_trace_buffer.empty())instruction_trace_buffer[instruction_trace_total++%instruction_trace_buffer.size()]=trace_entry;
+    instructions++;
     // Observe BIOS putchar entry without replacing or skipping its instructions.
     if(((ip&0x1fffffff)==0xa0 && r[9]==0x3c)||((ip&0x1fffffff)==0xb0 && r[9]==0x3d))bus.append_tty(char(r[4]&255));
-#ifdef AVOPSEMU_ENABLE_CPU_PROFILE
-    if(profile_sample)cpu_profile.trace_ns+=uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(CpuProfileClock::now()-trace_start).count());
-#endif
-#ifdef AVOPSEMU_ENABLE_CPU_PROFILE
+    if(profile_sample){profile_counters.phase_timer_pairs++;profile_counters.trace_ns+=cpu_profile_elapsed_ns(trace_start,profile_counters.clock_pair_overhead_ns);}
     const auto decode_start=profile_sample?CpuProfileClock::now():CpuProfileClock::time_point{};
-#endif
     const unsigned op=ins>>26,s=(ins>>21)&31,t=(ins>>16)&31,d=(ins>>11)&31,sh=(ins>>6)&31;
     const uint32_t a=r[s],b=r[t],imm=uint32_t(int32_t(int16_t(ins&65535)));
-#ifdef AVOPSEMU_ENABLE_CPU_PROFILE
-    if(profile_sample){cpu_profile.decode_ns+=uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(CpuProfileClock::now()-decode_start).count());cpu_profile.sampled_opcodes[op]++;}
-#endif
+    if(profile_sample){profile_counters.phase_timer_pairs++;profile_counters.decode_ns+=cpu_profile_elapsed_ns(decode_start,profile_counters.clock_pair_overhead_ns);profile_counters.sampled_opcodes[op]++;}
     const unsigned old_pending=pending_reg;const uint32_t old_value=pending_value;
     if(pending_reg)r[pending_reg]=pending_value;
     pending_reg=0;pc=next_pc;next_pc=pc+4;delay_slot=false;branch_taken=false;
@@ -260,28 +404,75 @@ void Cpu::step() {
     auto branch=[&](bool take){delay_slot=true;branch_taken=take;if(take)next_pc=ip+4+(imm<<2);};
     auto arithmetic=[&](unsigned reg,int64_t value){if(value>2147483647ll||value< -2147483648ll)exception(12);else put(reg,uint32_t(value));};
     const uint32_t address=a+imm;
+    auto bus_read8=[&](uint32_t target)->uint8_t{
+#ifdef AVOPSEMU_ENABLE_CPU_PROFILE
+        if(profile_sample){profile_counters.bus_access_calls++;const auto start=CpuProfileClock::now();const auto value=bus.read8(target);profile_counters.bus_read_ns+=cpu_profile_elapsed_ns(start,profile_counters.clock_pair_overhead_ns);return value;}
+#endif
+        return bus.read8(target);
+    };
+    auto bus_read16=[&](uint32_t target)->uint16_t{
+#ifdef AVOPSEMU_ENABLE_CPU_PROFILE
+        if(profile_sample){profile_counters.bus_access_calls++;const auto start=CpuProfileClock::now();const auto value=bus.read16(target);profile_counters.bus_read_ns+=cpu_profile_elapsed_ns(start,profile_counters.clock_pair_overhead_ns);return value;}
+#endif
+        return bus.read16(target);
+    };
+    auto bus_read32=[&](uint32_t target)->uint32_t{
+#ifdef AVOPSEMU_ENABLE_CPU_PROFILE
+        if(profile_sample){profile_counters.bus_access_calls++;const auto start=CpuProfileClock::now();const auto value=bus.read32(target);profile_counters.bus_read_ns+=cpu_profile_elapsed_ns(start,profile_counters.clock_pair_overhead_ns);return value;}
+#endif
+        return bus.read32(target);
+    };
+    auto bus_write8=[&](uint32_t target,uint8_t value){
+#ifdef AVOPSEMU_ENABLE_CPU_PROFILE
+        if(profile_sample){profile_counters.bus_access_calls++;const auto start=CpuProfileClock::now();bus.write8(target,value);profile_counters.bus_write_ns+=cpu_profile_elapsed_ns(start,profile_counters.clock_pair_overhead_ns);return;}
+#endif
+        bus.write8(target,value);
+    };
+    auto bus_write16=[&](uint32_t target,uint16_t value){
+#ifdef AVOPSEMU_ENABLE_CPU_PROFILE
+        if(profile_sample){profile_counters.bus_access_calls++;const auto start=CpuProfileClock::now();bus.write16(target,value);profile_counters.bus_write_ns+=cpu_profile_elapsed_ns(start,profile_counters.clock_pair_overhead_ns);return;}
+#endif
+        bus.write16(target,value);
+    };
+    auto bus_write32=[&](uint32_t target,uint32_t value){
+#ifdef AVOPSEMU_ENABLE_CPU_PROFILE
+        if(profile_sample){profile_counters.bus_access_calls++;const auto start=CpuProfileClock::now();bus.write32(target,value);profile_counters.bus_write_ns+=cpu_profile_elapsed_ns(start,profile_counters.clock_pair_overhead_ns);return;}
+#endif
+        bus.write32(target,value);
+    };
+    auto dma_subword_write=[&](uint32_t target,uint32_t value,unsigned width){
+#ifdef AVOPSEMU_ENABLE_CPU_PROFILE
+        if(profile_sample){profile_counters.bus_access_calls++;const auto start=CpuProfileClock::now();const bool handled=bus.dma_subword_write(target,value,width);profile_counters.bus_write_ns+=cpu_profile_elapsed_ns(start,profile_counters.clock_pair_overhead_ns);return handled;}
+#endif
+        return bus.dma_subword_write(target,value,width);
+    };
+    auto spu_register_write=[&](uint32_t target,uint16_t value){
+#ifdef AVOPSEMU_ENABLE_CPU_PROFILE
+        if(profile_sample){profile_counters.bus_access_calls++;const auto start=CpuProfileClock::now();bus.spu.write(target,value);profile_counters.bus_write_ns+=cpu_profile_elapsed_ns(start,profile_counters.clock_pair_overhead_ns);return;}
+#endif
+        bus.spu.write(target,value);
+    };
     auto store=[&](unsigned width){
         const auto p=physical(address);
-        if(bus.dma_subword_write(address,b,width))return;
-        if(width==1&&p>=0x1f801c00&&p<0x1f801e80){if(!(p&1))bus.spu.write(p-0x1f801c00,uint16_t(b));return;}
-        if(p==0x1f801820||p==0x1f801824){bus.write32(address,b);return;}
-        if(width==1)bus.write8(address,uint8_t(b));else bus.write16(address,uint16_t(b));
+        if(dma_subword_write(address,b,width))return;
+        if(width==1&&p>=0x1f801c00&&p<0x1f801e80){if(!(p&1))spu_register_write(p-0x1f801c00,uint16_t(b));return;}
+        if(p==0x1f801820||p==0x1f801824){bus_write32(address,b);return;}
+        if(width==1)bus_write8(address,uint8_t(b));else bus_write16(address,uint16_t(b));
     };
     auto aligned=[&](unsigned mask,bool store){if(address&mask){cop0[8]=address;exception(store?5:4);return false;}return true;};
-    auto half=[&](){return uint32_t(bus.read16(address));};
+    auto half=[&](){return uint32_t(bus_read16(address));};
     unsigned extra_cycles=0;
     // KUc applies even to byte/unaligned transfers and isolated-cache stores.
     const bool memory_load=(op>=32&&op<=38)||op==50;
     const bool memory_store=(op>=40&&op<=43)||op==46||op==58;
+    const auto execute_start=profile_sample?CpuProfileClock::now():CpuProfileClock::time_point{};
     if((cop0[12]&2)&&(address&0x80000000u)&&(memory_load||memory_store)){
         // COP2 permission is checked before its memory address.
         if((op==50||op==58)&&!(cop0[12]&(1u<<30)))exception(11,2);
         else{cop0[8]=address;exception(memory_store?5:4);}
-        r[0]=0;bus.tick_timers();return;
+        r[0]=0;tick_devices();if(profile_sample){profile_counters.phase_timer_pairs++;const auto elapsed=cpu_profile_elapsed_ns(execute_start,profile_counters.clock_pair_overhead_ns);profile_counters.execute_ns+=elapsed;profile_counters.sampled_execute_ns[op]+=elapsed;}return;
     }
-#ifdef AVOPSEMU_ENABLE_CPU_PROFILE
-    const auto execute_start=profile_sample?CpuProfileClock::now():CpuProfileClock::time_point{};
-#endif
+    {
     switch(op) {
     case 0:
         switch(ins&63) {
@@ -336,40 +527,39 @@ void Cpu::step() {
         break;
     case 50:
         if(!(cop0[12]&(1u<<30)))exception(11,2);
-        else if(aligned(3,false)){extra_cycles=main_ram_read_wait_cycles(address);gte.write_data(t,bus.read32(address));}
+        else if(aligned(3,false)){extra_cycles=main_ram_read_wait_cycles(address);gte.write_data(t,bus_read32(address));}
         break;
     case 58:
         if(!(cop0[12]&(1u<<30)))exception(11,2);
-        else if(aligned(3,true)&&!(cop0[12]&0x10000))bus.write32(address,gte.read_data(t));
+        else if(aligned(3,true)&&!(cop0[12]&0x10000))bus_write32(address,gte.read_data(t));
         break;
     case 48:case 56:exception(11,0);break;
     case 17:case 19:case 49:case 51:case 57:case 59:exception(11,op&3);break;
-    case 32:extra_cycles=main_ram_read_wait_cycles(address);load(uint32_t(int32_t(int8_t(bus.read8(address)))));break;
+    case 32:extra_cycles=main_ram_read_wait_cycles(address);load(uint32_t(int32_t(int8_t(bus_read8(address)))));break;
     case 33:if(aligned(1,false)){extra_cycles=main_ram_read_wait_cycles(address);load(uint32_t(int32_t(int16_t(half()))));}break;
-    case 35:if(aligned(3,false)){extra_cycles=main_ram_read_wait_cycles(address);load(bus.read32(address));}break;
-    case 36:extra_cycles=main_ram_read_wait_cycles(address);load(bus.read8(address));break;
+    case 35:if(aligned(3,false)){extra_cycles=main_ram_read_wait_cycles(address);load(bus_read32(address));}break;
+    case 36:extra_cycles=main_ram_read_wait_cycles(address);load(bus_read8(address));break;
     case 37:if(aligned(1,false)){extra_cycles=main_ram_read_wait_cycles(address);load(half());}break;
     case 34:case 38:{
         extra_cycles=main_ram_read_wait_cycles(address);
-        const uint32_t word=bus.read32(address&~3u),previous=(old_pending==t&&t)?old_value:b;
+        const uint32_t word=bus_read32(address&~3u),previous=(old_pending==t&&t)?old_value:b;
         const unsigned n=address&3;
         if(op==34){unsigned shift=(3-n)*8;load((previous&(0x00ffffffu>>(n*8)))|(word<<shift));}
         else {unsigned shift=n*8;uint32_t mask=n?0xffffffffu<<(32-shift):0;load((previous&mask)|(word>>shift));}break;}
     case 40:if(!(cop0[12]&0x10000))store(1);break;
     case 41:if(aligned(1,true)&&!(cop0[12]&0x10000)){store(2);}break;
-    case 43:if(aligned(3,true)&&!(cop0[12]&0x10000))bus.write32(address,b);break;
+    case 43:if(aligned(3,true)&&!(cop0[12]&0x10000))bus_write32(address,b);break;
     case 42:case 46:if(!(cop0[12]&0x10000)){
-        uint32_t word=bus.read32(address&~3u);unsigned n=address&3;
+        uint32_t word=bus_read32(address&~3u);unsigned n=address&3;
         if(op==42){unsigned shift=(3-n)*8;uint32_t mask=n==3?0:0xffffffffu<<((n+1)*8);word=(word&mask)|(b>>shift);}
         else {unsigned shift=n*8;uint32_t mask=n?(1u<<shift)-1:0;word=(word&mask)|(b<<shift);}
-        bus.write32(address&~3u,word);
+        bus_write32(address&~3u,word);
     }break;
     default:exception(10);break;
     }
-#ifdef AVOPSEMU_ENABLE_CPU_PROFILE
-    if(profile_sample)cpu_profile.execute_ns+=uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(CpuProfileClock::now()-execute_start).count());
-#endif
-    r[0]=0;bus.tick_timers();for(unsigned cycle=0;cycle<extra_cycles;cycle++)bus.tick_timers();
+    }
+    if(profile_sample){profile_counters.phase_timer_pairs++;const auto elapsed=cpu_profile_elapsed_ns(execute_start,profile_counters.clock_pair_overhead_ns);profile_counters.execute_ns+=elapsed;profile_counters.sampled_execute_ns[op]+=elapsed;}
+    r[0]=0;tick_devices();for(unsigned cycle=0;cycle<extra_cycles;cycle++)tick_devices();
 }
 std::string Cpu::failure_summary()const{
  std::ostringstream out;out<<"BIOS SystemError A0(40)";
@@ -437,11 +627,18 @@ std::string Cpu::diagnostic()const{
  out<<bus.sio[0].diagnostic();
  out<<"GPUSTAT="<<std::hex<<bus.gpu.status<<" DrawMode="<<bus.gpu.draw_mode<<" TextureWindow="<<bus.gpu.texture_window<<" PacketWords="<<std::dec<<bus.gpu.count<<"\n";
  out<<"GPU words="<<bus.gpu.words<<" polygons="<<bus.gpu.polygons<<" rectangles="<<bus.gpu.rectangles<<" lines="<<bus.gpu.line_segments<<"\n";
+  out<<"Crash trace capacity="<<trace.size()<<" (always enabled); optional trace enabled="<<debug_options.instruction_trace_enabled<<" retained="<<std::dec<<instruction_trace_records()<<" capacity="<<instruction_trace_buffer.size()<<"\n";
+  out<<"CPU_PROFILE enabled="<<debug_options.profiler_enabled<<" sample_every="<<debug_options.profile_sample_interval<<" sampled_steps="<<profile_counters.sampled_steps
+     <<" sampled_host_ns(step/fetch/trace/decode/execute/device_tick)="<<profile_counters.step_ns<<"/"<<profile_counters.fetch_ns<<"/"<<profile_counters.trace_ns<<"/"<<profile_counters.decode_ns<<"/"<<profile_counters.execute_ns<<"/"<<profile_counters.device_tick_ns
+     <<" bus_read_write_ns="<<profile_counters.bus_read_ns<<"/"<<profile_counters.bus_write_ns<<" clock_pair_overhead_ns="<<profile_counters.clock_pair_overhead_ns
+     <<" timing_scopes(phase/device_tick/bus/subsystem)="<<profile_counters.phase_timer_pairs<<"/"<<profile_counters.device_tick_calls<<"/"<<profile_counters.bus_access_calls<<"/"<<profile_counters.subsystem_timer_scopes<<" opcode_samples_ns=";
+  for(unsigned opcode=0;opcode<profile_counters.sampled_opcodes.size();opcode++)if(profile_counters.sampled_opcodes[opcode])out<<std::hex<<opcode<<":"<<std::dec<<profile_counters.sampled_opcodes[opcode]<<"/"<<profile_counters.sampled_execute_ns[opcode]<<" ";
 #ifdef AVOPSEMU_ENABLE_CPU_PROFILE
-   out<<"CPU_PROFILE sample_every=4096 sampled_steps="<<std::dec<<cpu_profile.sampled_steps<<" fetch_ns="<<cpu_profile.fetch_ns<<" trace_ns="<<cpu_profile.trace_ns<<" decode_ns="<<cpu_profile.decode_ns<<" execute_ns="<<cpu_profile.execute_ns<<" opcode_sample_counts=";
-  for(unsigned opcode=0;opcode<cpu_profile.sampled_opcodes.size();opcode++)if(cpu_profile.sampled_opcodes[opcode])out<<std::hex<<opcode<<":"<<std::dec<<cpu_profile.sampled_opcodes[opcode]<<" ";
-  out<<"\n";
+  out<<"\nCPU_PROFILE subsystem_sampled_host_ns(sio/gpu_video/irq/cdrom/dma/spu/timers)="<<std::dec<<profile_counters.sio_tick_ns<<"/"<<profile_counters.gpu_video_ns<<"/"<<profile_counters.irq_sample_ns<<"/"<<profile_counters.cdrom_tick_ns<<"/"<<profile_counters.dma_tick_ns<<"/"<<profile_counters.spu_tick_ns<<"/"<<profile_counters.timer_tick_ns;
+#else
+  out<<"\nCPU_PROFILE subsystem timing=not compiled (build with AVOPSEMU_ENABLE_CPU_PROFILE)";
 #endif
+  out<<"\nCPU diagnostic logging enabled="<<debug_options.diagnostic_logging<<" retained_events="<<std::dec<<diagnostic_event_records()<<"/"<<diagnostic_history.size()<<"\n";
   out<<"GPU host rasterizer time ns="<<std::dec<<bus.gpu.raster_time_ns<<" (since GPU reset; host CPU time, not emulated GPU time)\n";
  out<<"Video line="<<std::dec<<bus.gpu.video_line<<" dot="<<bus.gpu.video_dot<<" field="<<bus.gpu.video_field<<" vblank="<<bus.gpu.video_vblank<<" frames="<<bus.gpu.video_frames<<" vblank_events="<<bus.gpu.vblank_events<<"\n";
  out<<"GPU display registers:";for(auto word:bus.gpu.display)out<<" "<<std::hex<<word;out<<"\n";

@@ -72,6 +72,19 @@ void persist_preferences(HWND w){
   MessageBoxW(w,error.c_str(),L"AVOPSEMU settings could not be saved",MB_OK|MB_ICONERROR);
  }
 }
+ps1::CpuDebugOptions cpu_debug_options(const avopsui::Preferences& value){
+ ps1::CpuDebugOptions options;options.profiler_enabled=value.cpu_profiler_enabled;options.profile_sample_interval=value.cpu_profile_sample_interval;
+ options.instruction_trace_enabled=value.cpu_trace_enabled;options.trace_buffer_size=value.cpu_trace_buffer_size;
+ options.break_on_reserved_instruction=value.cpu_break_on_reserved;options.break_on_cpu_exception=value.cpu_break_on_exception;
+ options.pc_breakpoint_enabled=value.cpu_pc_breakpoint_enabled;options.pc_breakpoint_address=value.cpu_pc_breakpoint_address;options.diagnostic_logging=value.cpu_diagnostic_logging;
+ return options;
+}
+void configure_cpu_debug(ps1::Cpu& target,const avopsui::Preferences& value){
+ std::string error;if(!target.configure_debug(cpu_debug_options(value),error))throw std::runtime_error("Invalid CPU debugger settings: "+error);
+}
+void apply_cpu_debug_preferences(){
+ if(!cpu)return;std::lock_guard<std::mutex> lock(machine_mutex);configure_cpu_debug(*cpu,preferences);
+}
 void save_keyboard(HWND w,bool=false){
  preferences.wasd_profile=wasd_profile;preferences.neutral_opposites=keyboard.neutral_opposites;preferences.keyboard_keys=keyboard.keys;persist_preferences(w);
 }
@@ -349,6 +362,7 @@ void rebuild_ui_resources(){
 void apply_preferences(HWND w){
  const bool restart=running&&limit_speed!=preferences.limit_speed;
  if(restart)stop(w);
+ apply_cpu_debug_preferences();
  if(w&&preferences.fullscreen!=fullscreen){
   std::wstring error;
   if(!set_fullscreen_window(w,preferences.fullscreen,error)){preferences.fullscreen=fullscreen;show_fullscreen_error(w,error);}
@@ -369,8 +383,9 @@ void apply_preferences(HWND w){
 }
 void advance(HWND w,unsigned n){
  show_welcome=false;
- try{for(unsigned i=0;i<n;i++){cpu->step();if(cpu->bios_system_error)throw std::runtime_error(cpu->failure_summary());}status=L"Da thuc thi lenh.";}
-  catch(const std::exception& e){win_diag::write_event("CPU step",e.what(),true);stop(w);std::string message=e.what();status=L"Dừng: "+std::wstring(message.begin(),message.end());last_fault=status;}
+ cpu->resume_from_debug_break();
+ try{for(unsigned i=0;i<n;i++){cpu->step();if(cpu->debug_break_pending){const auto message=cpu->debug_break_description();status=L"Debugger paused: "+std::wstring(message.begin(),message.end());break;}if(cpu->bios_system_error)throw std::runtime_error(cpu->failure_summary());}if(!cpu->debug_break_pending)status=L"Da thuc thi lenh.";}
+  catch(const std::exception& e){cpu->record_diagnostic_error(e.what());win_diag::write_event("CPU step",e.what(),true);stop(w);std::string message=e.what();status=L"Dừng: "+std::wstring(message.begin(),message.end());last_fault=status;}
  refresh();
 }
 void loadBios(HWND w){
@@ -400,6 +415,7 @@ void openExe(HWND w){
   if(!f.read(reinterpret_cast<char*>(bytes.data()),static_cast<std::streamsize>(bytes.size())))throw std::runtime_error("EXE read failed");
   auto fresh=std::make_unique<ps1::Bus>();auto freshCpu=std::make_unique<ps1::Cpu>(*fresh);
   show_welcome=false;ps1::load_exe(*fresh,*freshCpu,bytes);
+   configure_cpu_debug(*freshCpu,preferences);
    cpu.reset();bus=std::move(fresh);cpu=std::move(freshCpu);entry=cpu->pc;initial_regs=cpu->r;exe_loaded=true;has_bios=false;game_booted=false;current_disc_path.clear();bios_name=L"Homebrew trực tiếp";disc_name=std::filesystem::path(file).filename().wstring();
   status=L"PS-X EXE loaded. Bam Run. Khong co BIOS services; chi homebrew tu khoi tao.";
   }catch(const std::exception& e){win_diag::write_event("Load PS-X EXE",e.what(),true);std::string text=e.what();status=L"EXE: "+std::wstring(text.begin(),text.end());}
@@ -441,6 +457,16 @@ std::filesystem::path default_capture_path(){
  SYSTEMTIME time{};GetLocalTime(&time);static std::atomic<uint64_t> sequence{0};
  std::wostringstream name;name<<L"capture_"<<std::setfill(L'0')<<std::setw(4)<<time.wYear<<std::setw(2)<<time.wMonth<<std::setw(2)<<time.wDay<<L"_"<<std::setw(2)<<time.wHour<<std::setw(2)<<time.wMinute<<std::setw(2)<<time.wSecond<<L"_"<<std::setw(3)<<time.wMilliseconds<<L"_"<<sequence++<<L".txt";
  return directory/name.str();
+}
+void export_cpu_data(HWND w,bool trace){
+ wchar_t path[32768]{};const wchar_t* filter=trace?L"CPU instruction trace (*.txt)\0*.txt\0All files\0*.*\0":L"CPU diagnostics (*.txt)\0*.txt\0All files\0*.*\0";
+ OPENFILENAMEW dialog{};dialog.lStructSize=sizeof(dialog);dialog.hwndOwner=w;dialog.lpstrFile=path;dialog.nMaxFile=static_cast<DWORD>(sizeof(path)/sizeof(path[0]));dialog.lpstrFilter=filter;dialog.lpstrDefExt=L"txt";dialog.Flags=OFN_OVERWRITEPROMPT|OFN_PATHMUSTEXIST|OFN_NOCHANGEDIR;
+ if(!GetSaveFileNameW(&dialog)){const DWORD code=CommDlgExtendedError();if(code){const auto message="CPU export dialog failed, CommDlgExtendedError="+std::to_string(code);win_diag::write_event("CPU export",message.c_str(),true);MessageBoxW(w,L"The CPU export dialog failed. See session.log for details.",L"AVOPSEMU CPU export",MB_OK|MB_ICONERROR);}return;}
+ std::string content;
+ {std::lock_guard<std::mutex> lock(machine_mutex);if(!cpu)throw std::runtime_error("CPU is unavailable for export");content=trace?cpu->instruction_trace_export_text():cpu->diagnostic_log_text();}
+ const auto result=ps1::write_verified_file(std::filesystem::path(path),content.data(),content.size());
+ if(!result.success){const std::string details="CPU export failed: "+result.error+" (error "+std::to_string(result.error_code)+")";win_diag::write_event("CPU export",details.c_str(),true);const std::wstring message(details.begin(),details.end());MessageBoxW(w,message.c_str(),L"AVOPSEMU CPU export failed",MB_OK|MB_ICONERROR);return;}
+ const std::wstring message=L"CPU data exported and read-back verified ("+std::to_wstring(result.bytes_verified)+L" bytes).";MessageBoxW(w,message.c_str(),L"AVOPSEMU CPU export",MB_OK|MB_ICONINFORMATION);
 }
 void save_diagnostic_capture(HWND w,const std::filesystem::path& output_path){
  try{
@@ -546,7 +572,17 @@ LRESULT CALLBACK proc_impl(HWND w,UINT m,WPARAM wp,LPARAM lp){
  case WM_GETMINMAXINFO:{auto p=reinterpret_cast<MINMAXINFO*>(lp);p->ptMinTrackSize={1040,780};return 0;}
  case WM_COMMAND:
   switch(LOWORD(wp)){
-     case 134:{avopsui::SettingsActions actions;actions.changed=[w]{apply_preferences(w);};actions.choose_bios=[w]{loadBios(w);};actions.snapshot=[&]{avopsui::SettingsSnapshot snapshot;snapshot.bios_path=preferences.bios_path;snapshot.bios_name=bios_name;snapshot.disc_name=disc_name;snapshot.bios_loaded=has_bios;snapshot.disc_mounted=bus&&bus->cd.sectors!=0;snapshot.region=bus?bus->cd.effective_region():4;return snapshot;};settings_window=avopsui::open_settings_window(w,preferences,preferences_path,actions,preferences.font_size);if(!settings_window)MessageBoxW(w,L"Không thể tạo cửa sổ Settings Center.",L"AVOPSEMU",MB_OK|MB_ICONERROR);break;}
+      case 134:{
+       avopsui::SettingsActions actions;actions.changed=[w]{apply_preferences(w);};actions.choose_bios=[w]{loadBios(w);};
+       actions.export_cpu_trace=[w]{export_cpu_data(w,true);};actions.export_cpu_diagnostics=[w]{export_cpu_data(w,false);};
+       actions.snapshot=[&]{
+        avopsui::SettingsSnapshot snapshot;std::lock_guard<std::mutex> lock(machine_mutex);
+        snapshot.bios_path=preferences.bios_path;snapshot.bios_name=bios_name;snapshot.disc_name=disc_name;snapshot.bios_loaded=has_bios;snapshot.disc_mounted=bus&&bus->cd.sectors!=0;snapshot.region=bus?bus->cd.effective_region():4;
+        snapshot.cpu_mips=core_mips;snapshot.cpu_mips_valid=running&&core_mips>0;
+        if(cpu){snapshot.cpu_instructions=cpu->instructions;snapshot.cpu_profile_samples=cpu->profile_counters.sampled_steps;snapshot.cpu_profile_fetch_ns=cpu->profile_counters.fetch_ns;snapshot.cpu_profile_trace_ns=cpu->profile_counters.trace_ns;snapshot.cpu_profile_decode_ns=cpu->profile_counters.decode_ns;snapshot.cpu_profile_execute_ns=cpu->profile_counters.execute_ns;snapshot.cpu_trace_records=cpu->instruction_trace_records();snapshot.cpu_trace_capacity=cpu->instruction_trace_buffer.size();snapshot.cpu_diagnostic_events=cpu->diagnostic_event_records();}
+        return snapshot;
+       };
+       settings_window=avopsui::open_settings_window(w,preferences,preferences_path,actions,preferences.font_size);if(!settings_window)MessageBoxW(w,L"Không thể tạo cửa sổ Settings Center.",L"AVOPSEMU",MB_OK|MB_ICONERROR);break;}
     case 135:{if(!game_library){MessageBoxW(w,L"Game Library chưa được khởi tạo.",L"AVOPSEMU",MB_OK|MB_ICONERROR);break;}avopsui::LibraryActions actions;actions.mount_disc=[w](const std::filesystem::path& path){mount_disc_path(w,path);};actions.boot_disc=[w](const std::filesystem::path& path){boot_library_game(w,path);};library_window=avopsui::open_game_library_window(w,*game_library,std::move(actions));if(!library_window)MessageBoxW(w,L"Không thể tạo cửa sổ Game Library.",L"AVOPSEMU",MB_OK|MB_ICONERROR);break;}
    case 129:case 130:
     if(!running)start_run(w);
@@ -611,7 +647,8 @@ LRESULT CALLBACK proc_impl(HWND w,UINT m,WPARAM wp,LPARAM lp){
    SetWindowTextW(pad_hint,hint.c_str());}
 
    if(!runner->active()){
-    const auto error=runner->error();stop(w,true);status=L"Dừng: "+std::wstring(error.begin(),error.end());last_fault=status;refresh();return 0;
+     const bool debugger_break=runner->debugger_paused_at_break();const auto error=runner->error();stop(w,!debugger_break);
+     status=(debugger_break?L"Debugger paused: ":L"Dừng: ")+std::wstring(error.begin(),error.end());if(!debugger_break)last_fault=status;refresh();return 0;
   }
   if(audio_output.error()!=MMSYSERR_NOERROR&&audio_output.ready()==false){audio_output.close();status=L"Loi phat am thanh Windows; CPU van chay.";}
   bool changed=false;
@@ -711,7 +748,7 @@ int run_gui(HINSTANCE h,int show){
  keyboard.keys=preferences.keyboard_keys;keyboard.neutral_opposites=preferences.neutral_opposites;
  large_view=!preferences.show_sidebar;debug_visible=preferences.show_debugger;toolbar_visible=preferences.show_toolbar;status_visible=preferences.show_status;fps_hud_visible=preferences.show_fps;
   avopsui::apply_palette(preferences.theme,preferences.accent);avopsui::set_game_library_font_size(preferences.font_size);rebuild_ui_resources();
- bus=std::make_unique<ps1::Bus>();cpu=std::make_unique<ps1::Cpu>(*bus);ps1::install_demo(*bus);cpu->reset(0);
+  bus=std::make_unique<ps1::Bus>();cpu=std::make_unique<ps1::Cpu>(*bus);ps1::install_demo(*bus);cpu->reset(0);configure_cpu_debug(*cpu,preferences);
  WNDCLASSW c{};c.lpfnWndProc=proc;c.hInstance=h;c.lpszClassName=L"AVOPSEMUWindow";c.hIcon=LoadIconW(h,MAKEINTRESOURCEW(1));c.hCursor=LoadCursor(nullptr,IDC_ARROW);c.hbrBackground=background_brush;
  WNDCLASSW v{};v.lpfnWndProc=vramProc;v.hInstance=h;v.lpszClassName=L"PS1Vram";v.hCursor=LoadCursor(nullptr,IDC_ARROW);
  if(!RegisterClassW(&v))return 1;
